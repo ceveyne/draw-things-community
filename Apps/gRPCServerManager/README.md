@@ -16,13 +16,17 @@ A lightweight macOS menu bar app that starts, stops, and monitors the Draw Thing
 
 The built-in **gRPC Queue Monitor** allows for monitoring running or recently finished generations. This can be helpful when you use your gRPC server for several clients across your local network, or for generation tasks running in the background.
 
-![grpc_monitor_queue_tools](docs/images/grpc_monitor_queue_tools.webp)
+![grpc_monitor_queue_tools](docs/images/grpc_monitor_queue_tools_d.webp)
 
 ### gRPC Queue Monitor
 
 **gRPC Queue Monitor** allows for reviewing, previewing, and canceling running jobs and lets you examine and save the generated images and videos.
 
-![grpc_monitor_queue_1](docs/images/grpc_monitor_queue_1.webp) ![grpc_monitor_queue_2](docs/images/grpc_monitor_queue_2.webp) ![grpc_monitor_queue_4](docs/images/grpc_monitor_queue_4.webp) ![grpc_monitor_preview](docs/images/grpc_monitor_preview.webp) ![grpc_monitor_save_as](docs/images/grpc_monitor_save_as.webp)
+![grpc_monitor_queue](docs/images/grpc_monitor_queue_2_d.webp)
+
+![grpc_monitor_preview](docs/images/grpc_monitor_preview_d.webp) 
+
+![grpc_monitor_save_as](docs/images/grpc_monitor_save_as.webp)
 
 ### Experimental – Draw Things App Support  
   
@@ -32,19 +36,21 @@ Disclaimer: ☝️ I am fully aware that the app support presented below is only
   
 When connected from the Draw Things App (locally or from other devices across your local network), **gRPC Proxy** immediately releases the UI after scheduling a generation task by returning an image as a receipt. You can continue scheduling additional tasks and put them on the queue instead of watching the progress bar of your current render. Running or recently finished generations can still be observed from the **gRPC Queue Monitor**. Re-sending an already processed request updates you on all current tasks. Finished jobs arrive with your next request. The **gRPC Queue Monitor** optionally gives you a complete overview of all the different requests in the queue.   
   
-![grpc_monitor_queue_6](docs/images/grpc_monitor_queue_6.webp)  
+![grpc_monitor_queue_6](docs/images/grpc_monitor_queue_6_d.webp)  
   
 Since we cannot provide a proper UI on Draw Things App for the queuing feature, you may use a combination of the receipt the proxy returns and a prompt to control a particular task (e.g. to cancel it). Receipts are adapted to the requesting client.  
   
 ### gRPC Proxy on iPhone  
   
-![iphone_receipt](docs/images/iphone_receipt.webp) ![iphone_delivered](docs/images/iphone_delivered.webp) ![iphone_result](docs/images/iphone_result.webp)  
+![iphone_receipt](docs/images/iphone_receipt_generated.webp)
+
+![iphone_delivered](docs/images/iphone_receipt_generated_delivered.webp) 
 
 ### gRPC Proxy on Mac  
   
-![draw_things_app_progress](docs/images/draw_things_app_progress.webp)
+![draw_things_app_progress](docs/images/draw_things_app_grpc_monitor_progress.webp)
 
-![draw_things_app_delivered](docs/images/draw_things_app_delivered.webp)
+![draw_things_app_delivered](docs/images/draw_things_app_grpc_monitor_delivered.webp)
 
 ## Setup
 
