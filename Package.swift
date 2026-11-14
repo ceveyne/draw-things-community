@@ -2,11 +2,16 @@
 import Foundation
 import PackageDescription
 
+// Set by Apps/gRPCServerProxy/build.sh: links the certificates but leaves out the tokenizer
+// tables (about 58 MB), which the proxy never uses. The tables are replaced by empty stubs.
+let slimResources = ProcessInfo.processInfo.environment["DRAWTHINGS_SLIM_RESOURCES"] == "1"
+
 let package = Package(
   name: "DrawThings",
   platforms: [.macOS(.v13), .iOS(.v16), .tvOS(.v16), .visionOS(.v1)],
   products: [
     .executable(name: "gRPCServerCLI", targets: ["gRPCServerCLI"]),
+    .executable(name: "gRPCServerProxy", targets: ["gRPCServerProxy"]),
     .executable(name: "draw-things-cli", targets: ["DrawThingsCLI"]),
     .library(name: "_MediaGenerationKit", targets: ["_MediaGenerationKit"]),
   ],
@@ -88,6 +93,12 @@ let package = Package(
     .target(
       name: "C_Resources",
       path: "Libraries/BinaryResources/GeneratedC",
+      exclude: slimResources ? [] : ["slim_stubs.c"],
+      sources: slimResources
+        ? [
+          "server_crt_generated.c", "server_key_generated.c", "root_ca_generated.c",
+          "isrgrootx1_generated.c", "slim_stubs.c",
+        ] : nil,
       publicHeadersPath: "."
     ),
     .target(
@@ -501,6 +512,25 @@ let package = Package(
       path: "Apps/gRPCServerCLI",
       exclude: ["SupportingFiles"],
       sources: ["gRPCServerCLI.swift"]
+    ),
+    .executableTarget(
+      name: "gRPCServerProxy",
+      dependencies: [
+        "BinaryResources",
+        "DataModels",
+        "Diffusion",
+        "GRPCImageServiceModels",
+        "LocalImageGenerator",
+        "ModelZoo",
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "GRPC", package: "grpc-swift"),
+        .product(name: "Logging", package: "swift-log"),
+        .product(name: "NNC", package: "s4nnc"),
+        .product(name: "PNG", package: "swift-png"),
+      ],
+      path: "Apps/gRPCServerProxy",
+      exclude: ["build.sh", "build", "generate-node-layout.py"]
     ),
     .target(
       name: "DrawThingsCLILib",

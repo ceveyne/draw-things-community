@@ -47,6 +47,8 @@ playground.xcworkspace
 # .swiftpm
 
 .build/
+.build-slim/
+Libraries/BinaryResources/GeneratedC/slim_stubs.c
 
 # CocoaPods
 #
