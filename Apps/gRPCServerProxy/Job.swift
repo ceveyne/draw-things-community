@@ -63,11 +63,14 @@ final class Group {
     var requestId: String?
     var background: Bool
     var workdir: String?
+    var app: Bool? = nil
   }
 
   var toolInfo: ToolInfo? {
     source.map {
-      ToolInfo(source: $0, client: sourceClient, requestId: sourceRequestId, background: sourceBackground, workdir: sourceWorkdir)
+      ToolInfo(
+        source: $0, client: sourceClient, requestId: sourceRequestId, background: sourceBackground, workdir: sourceWorkdir,
+        app: sourceIsApp ? true : nil)
     }
   }
 
@@ -77,12 +80,15 @@ final class Group {
     sourceRequestId = info.requestId
     sourceBackground = info.background
     sourceWorkdir = info.workdir
+    sourceIsApp = info.app == true
   }
 
   var source: String? = nil
   var sourceClient: String? = nil
   var sourceRequestId: String? = nil
   var sourceBackground = false
+
+  var sourceIsApp = false
 
   var sourceWorkdir: String? = nil
   private let lock = NSLock()

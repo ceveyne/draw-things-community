@@ -63,6 +63,8 @@ final class QueueMonitor: NSObject, NSWindowDelegate, NSTableViewDataSource, NST
 
         var tool = false
 
+        var app = false
+
         var removable = false
     }
 
@@ -333,7 +335,7 @@ final class QueueMonitor: NSObject, NSWindowDelegate, NSTableViewDataSource, NST
                     thumbKey: (job["thumb"] as? String).map { "\($0.utf8.count):\($0.hashValue)" },
                     run: job["run"] as? Int, saveable: job["saveable"] as? Bool ?? false,
                     video: job["video"] as? Bool ?? false, filename: job["filename"] as? String,
-                    tool: job["tool"] as? Bool ?? false, removable: job["removable"] as? Bool ?? false)
+                    tool: job["tool"] as? Bool ?? false, app: job["app"] as? Bool ?? false, removable: job["removable"] as? Bool ?? false)
             }
             if let project = message["project"] as? String {
 
@@ -438,7 +440,7 @@ final class QueueMonitor: NSObject, NSWindowDelegate, NSTableViewDataSource, NST
     }
 
     private func image(for row: Row) -> NSImage? {
-        guard let text = row.thumb, let key = row.thumbKey else { return Self.appIcons[row.tool] ?? nil }
+        guard let text = row.thumb, let key = row.thumbKey else { return Self.appIcons[row.tool && !row.app] ?? nil }
         if let cached = images[key] { return cached.image }
         guard let data = Data(base64Encoded: text), let image = NSImage(data: data) else { return nil }
         images[key] = (text.hashValue, image)

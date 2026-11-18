@@ -37,6 +37,7 @@ private enum L10n {
     static var fixHistoryConfirm: String { isGerman ? "Verlauf anpassen" : "Sync History" }
     static var issueReceipt: String { isGerman ? "Receipt ausstellen" : "Issue Receipt" }
     static var queueMonitor: String { "Queue Monitor" }
+    static var queueDrawThings: String { "Queue Draw Things" }
     static var emptyQueue: String { isGerman ? "Queue leeren…" : "Empty Queue…" }
     static var emptyQueueTitle: String { isGerman ? "Queue leeren?" : "Empty the queue?" }
     static var emptyQueueInfo: String {
@@ -139,6 +140,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var proxyPortItem: NSMenuItem?
     private var fixHistoryItem: NSMenuItem?
     private var issueReceiptItem: NSMenuItem?
+    private var queueDrawThingsItem: NSMenuItem?
     private var emptyQueueItem: NSMenuItem?
     private let monitorSocketPath =
         NSHomeDirectory() + "/Library/Application Support/gRPC Server Manager/proxy/monitor.sock"
@@ -166,10 +168,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let kProxyPort = "proxyPort"
     private let kFixHistory = "proxyFixHistory"
     private let kIssueReceipt = "proxyIssueReceipt"
+    private let kQueueDrawThings = "proxyQueueDrawThings"
     private let proxyPortDefault = 7861
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        UserDefaults.standard.register(defaults: [kModelBrowser: true])
+        UserDefaults.standard.register(defaults: [kModelBrowser: true, kIssueReceipt: true, kQueueDrawThings: false])
         NSApp.setActivationPolicy(.accessory)
         setupEditMenu()
 
@@ -249,16 +252,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(proxyItem)
         proxyPortItem = menu.addItem(
             withTitle: L10n.setProxyPort, action: #selector(setProxyPort), keyEquivalent: "")
-        let fixHistoryItem = NSMenuItem(
-            title: L10n.fixHistory, action: #selector(toggleFixHistory), keyEquivalent: "")
-        fixHistoryItem.state = UserDefaults.standard.bool(forKey: kFixHistory) ? .on : .off
-        self.fixHistoryItem = fixHistoryItem
-        menu.addItem(fixHistoryItem)
-        let issueReceiptItem = NSMenuItem(
-            title: L10n.issueReceipt, action: #selector(toggleIssueReceipt), keyEquivalent: "")
-        issueReceiptItem.state = UserDefaults.standard.bool(forKey: kIssueReceipt) ? .on : .off
-        self.issueReceiptItem = issueReceiptItem
-        menu.addItem(issueReceiptItem)
         let monitorMenuItem = NSMenuItem(
             title: L10n.queueMonitor, action: #selector(toggleQueueMonitor), keyEquivalent: "")
         monitorItem = monitorMenuItem
@@ -266,6 +259,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         queueMonitor.onChange = { [weak self] in self?.updateStatusUI() }
         emptyQueueItem = menu.addItem(
             withTitle: L10n.emptyQueue, action: #selector(emptyQueue), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+
+        let queueDrawThingsItem = NSMenuItem(
+            title: L10n.queueDrawThings, action: #selector(toggleQueueDrawThings), keyEquivalent: "")
+        queueDrawThingsItem.state = UserDefaults.standard.bool(forKey: kQueueDrawThings) ? .on : .off
+        self.queueDrawThingsItem = queueDrawThingsItem
+        menu.addItem(queueDrawThingsItem)
+        let issueReceiptItem = NSMenuItem(
+            title: L10n.issueReceipt, action: #selector(toggleIssueReceipt), keyEquivalent: "")
+        issueReceiptItem.state = UserDefaults.standard.bool(forKey: kIssueReceipt) ? .on : .off
+        self.issueReceiptItem = issueReceiptItem
+        menu.addItem(issueReceiptItem)
+        let fixHistoryItem = NSMenuItem(
+            title: L10n.fixHistory, action: #selector(toggleFixHistory), keyEquivalent: "")
+        fixHistoryItem.state = UserDefaults.standard.bool(forKey: kFixHistory) ? .on : .off
+        self.fixHistoryItem = fixHistoryItem
+        menu.addItem(fixHistoryItem)
         menu.addItem(NSMenuItem.separator())
 
         let weightsCacheItem = NSMenuItem(
@@ -312,7 +322,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             scheduleAutoRestart()
         }
 
-        if useProxy { checkProjectsAccess {} }
+        if useProxy && queueDrawThingsOn { checkProjectsAccess {} }
     }
 
     private func setupEditMenu() {
@@ -514,8 +524,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var queueDrawThingsOn: Bool { UserDefaults.standard.bool(forKey: kQueueDrawThings) }
+
     private func startProxy() {
         guard !proxy.isBusy, !checkingProjectsAccess else { return }
+        guard queueDrawThingsOn else {
+            launchProxy()
+            return
+        }
         checkProjectsAccess { [weak self] in
 
             if self?.server.isBusy == true { self?.launchProxy() }
@@ -549,11 +565,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         args.append(fixHistory ? "--sync-history" : "--no-sync-history")
         let issueReceipt = UserDefaults.standard.bool(forKey: kIssueReceipt)
         args.append(issueReceipt ? "--issue-receipts" : "--no-issue-receipts")
+        let queueDrawThings = UserDefaults.standard.bool(forKey: kQueueDrawThings)
+        args.append(queueDrawThings ? "--queue-draw-things" : "--no-queue-draw-things")
+
+        if !queueDrawThings { args += ["--projects-directory", "none"] }
         args += ["--monitor-socket", monitorSocketPath]
         args += ["--language", L10n.isGerman ? "de" : "en"]
         proxyLog.append("[Config] Binary: \(bin)\n")
         proxyLog.append(
-            "[Config] Proxy port: \(port), upstream port: \(serverPort), sync history: \(fixHistory ? "on" : "off"), issue receipts: \(issueReceipt ? "on" : "off")\n")
+            "[Config] Proxy port: \(port), upstream port: \(serverPort), sync history: \(fixHistory ? "on" : "off"), issue receipts: \(issueReceipt ? "on" : "off"), queue Draw Things: \(queueDrawThings ? "on" : "off")\n")
         proxy.start(
             executable: bin, arguments: args, ports: [port],
             portsStayBusy: { [weak self] busy in
@@ -688,10 +708,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let firstTime = UserDefaults.standard.object(forKey: kUseProxy) == nil
         UserDefaults.standard.set(newVal, forKey: kUseProxy)
         if newVal && firstTime {
-            UserDefaults.standard.set(false, forKey: kFixHistory)
-            UserDefaults.standard.set(true, forKey: kIssueReceipt)
-            fixHistoryItem?.state = .off
-            issueReceiptItem?.state = .on
             queueMonitor.show()
         }
         updateStatusUI()
@@ -765,6 +781,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         UserDefaults.standard.set(newVal, forKey: kFixHistory)
         sender.state = newVal ? .on : .off
+    }
+
+    @objc private func toggleQueueDrawThings(_ sender: NSMenuItem) {
+        let newVal = !UserDefaults.standard.bool(forKey: kQueueDrawThings)
+        UserDefaults.standard.set(newVal, forKey: kQueueDrawThings)
+        sender.state = newVal ? .on : .off
+        updateStatusUI()
     }
 
     @objc private func toggleIssueReceipt(_ sender: NSMenuItem) {
@@ -911,8 +934,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         startItem?.isEnabled = !server.isBusy
         stopItem?.isEnabled = server.isBusy
 
-        for item in [proxyPortItem, fixHistoryItem, issueReceiptItem, monitorItem, emptyQueueItem] {
+        for item in [proxyPortItem, monitorItem, emptyQueueItem, queueDrawThingsItem] {
             item?.isEnabled = useProxy
+        }
+
+        let queued = useProxy && UserDefaults.standard.bool(forKey: kQueueDrawThings)
+        for item in [issueReceiptItem, fixHistoryItem] {
+            item?.isEnabled = queued
         }
     }
 

@@ -469,6 +469,21 @@ extension ProxyCommand {
     Thread.sleep(forTimeInterval: 0.3)
     let cliRow = rowsNow().first { $0["project"] as? String == "draw-things-cli" }
     check("and shows in the monitor under its own name, like our tools", cliRow != nil && cliRow?["tool"] as? Bool == true, "\(String(describing: cliRow?["project"]))")
+
+    service.queueDrawThings = false
+    let appCalled = run(proxied, "ok", user: "")
+    check("Queue Draw Things off: the app gets the frames of the real server and nothing else", appCalled.frames == expected.frames, "(\(appCalled.frames.count) of \(expected.frames.count))")
+    check("Queue Draw Things off: the same status as from the real server", appCalled.status.code == expected.status.code, "\(appCalled.status.code)")
+    Thread.sleep(forTimeInterval: 0.3)
+    let queueOffRows = rowsNow()
+    let queueOffRow = queueOffRows.first { $0["app"] as? Bool == true }
+    check("Queue Draw Things off: the call shows in the monitor as the app, not as a project", queueOffRow?["tool"] as? Bool == true && queueOffRow?["project"] as? String == "Draw Things", "\(queueOffRows.count) rows")
+    check("Queue Draw Things off: the call is finished and delivered", queueOffRow?["state"] as? String == "delivered", "\(queueOffRow?["state"] ?? "-")")
+    let appFailed = run(proxied, "fail", user: "")
+    check("Queue Draw Things off: a failure comes as from the real server", appFailed.status.code == failExpected.status.code && appFailed.status.message == failExpected.status.message, "\(appFailed.status.code)")
+    service.queueDrawThings = true
+    let appQueued = run(proxied, "ok", user: "")
+    check("Queue Draw Things on again: the app is queued as before (a receipt, not the frames of the server)", appQueued.frames != expected.frames, "(\(appQueued.frames.count) frames)")
     let generatedBeforeClose = rowsNow().filter { $0["state"] as? String == "generated" }.count
     let deliveredBeforeClose = rowsNow().filter { $0["state"] as? String == "delivered" }.count
     close(monitorFd)

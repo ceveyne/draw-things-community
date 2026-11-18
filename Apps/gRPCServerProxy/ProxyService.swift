@@ -139,6 +139,8 @@ final class ProxyService: ImageGenerationServiceProvider {
   var stateDirectoryPath: String? = nil
 
   var issueReceipts = false
+
+  var queueDrawThings = true
   private var seenClients = Set<String>()
 
   var localAppNames: Set<String>? = nil
@@ -418,13 +420,16 @@ final class ProxyService: ImageGenerationServiceProvider {
       }
     }
     let peerIsLocal = Self.peerIsThisComputer(context)
-    if let client = Self.trackedClient(
+    let trackedName = Self.trackedClient(
       headers: context.headers, request: request, extraThirdPartyUsers: thirdPartyUsers,
       peerIsLocal: peerIsLocal, localAppNames: localAppNames)
-    {
+    if trackedName != nil || !queueDrawThings {
+      let isApp = trackedName == nil
       return trackedRelay(
-        number: number, request: request, context: context, client: client,
-        tool: context.headers["x-dt-tool"].first.flatMap { $0.isEmpty ? nil : $0 },
+        number: number, request: request, context: context,
+        client: trackedName ?? (request.user.isEmpty ? "Draw Things" : request.user),
+        tool: isApp ? "Draw Things" : context.headers["x-dt-tool"].first.flatMap { $0.isEmpty ? nil : $0 },
+        isApp: isApp,
         requestId: context.headers["x-dt-request-id"].first,
         workdir: context.headers["x-dt-workdir"].first.flatMap { $0.removingPercentEncoding }.flatMap { $0.isEmpty ? nil : $0 },
         background: context.headers["x-dt-background"].first?.lowercased() == "true")
@@ -1842,6 +1847,7 @@ extension ProxyService {
 
           "open": group.source == nil && project != nil && project == open,
           "tool": group.source != nil,
+          "app": group.sourceIsApp,
           "cancellable": state == "running" || state == "pending",
           "detail": detail,
 
@@ -1922,7 +1928,9 @@ extension ProxyService {
       lines.append("\(Loc.t("Tool", "Werkzeug")): \(source)")
       if let client = group.sourceClient { lines.append("\(Loc.t("Called by", "Aufgerufen von")): \(client)") }
       if let id = group.sourceRequestId { lines.append("\(Loc.t("Request of the caller", "Anfrage des Aufrufers")): \(id)") }
-      lines.append("\(Loc.t("Background call", "Hintergrundaufruf")): \(group.sourceBackground ? Loc.t("yes", "ja") : Loc.t("no", "nein"))")
+      if !group.sourceIsApp {
+        lines.append("\(Loc.t("Background call", "Hintergrundaufruf")): \(group.sourceBackground ? Loc.t("yes", "ja") : Loc.t("no", "nein"))")
+      }
     }
     lines += detailModel(group, now: now, etas: etas).fields
       .map { "\($0.label): \($0.label == "Prompt" ? String($0.value.prefix(400)) : $0.value)" }
@@ -2269,7 +2277,7 @@ extension ProxyService {
   fileprivate func trackedRelay(
     number: Int, request: ImageGenerationRequest,
     context: StreamingResponseCallContext<ImageGenerationResponse>, client: String, tool: String?,
-    requestId: String?, workdir: String?, background: Bool
+    isApp: Bool = false, requestId: String?, workdir: String?, background: Bool
   ) -> EventLoopFuture<GRPCStatus> {
     let job: Job = lock.withLockCompat {
       let group = Group(code: makeUniqueCode(), key: "tracked-\(UUID().uuidString)", expected: 1)
@@ -2279,6 +2287,7 @@ extension ProxyService {
       group.sourceRequestId = requestId
       group.sourceWorkdir = workdir
       group.sourceBackground = background
+      group.sourceIsApp = isApp
       tracked.append(group)
       let job = Job(group: group, request: request)
       job.attachSpool(results?.spoolDirectory(for: job.id))

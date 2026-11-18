@@ -30,15 +30,19 @@ The built-in **gRPC Queue Monitor** allows for monitoring running or recently fi
 
 ### Experimental – Draw Things App Support  
   
-**gRPC Proxy** provides the technical base of the queue monitoring features – and adds an *experimental* feature. 👻  
+**gRPC Proxy** provides the technical base of the queue monitoring features – and adds an *experimental* feature, which is off by default (menu item `Queue Draw Things`). 👻  
   
 Disclaimer: ☝️ I am fully aware that the app support presented below is only a sketch to investigate the benefits and feasibility in general. Without a real integration into the Draw Things app’s `Version History`, this remains a hack, which, however, shows that and how the feature could work.  
   
-When connected from the Draw Things App (locally or from other devices across your local network), **gRPC Proxy** immediately releases the UI after scheduling a generation task by returning an image as a receipt. You can continue scheduling additional tasks and put them on the queue instead of watching the progress bar of your current render. Running or recently finished generations can still be observed from the **gRPC Queue Monitor**. Re-sending an already processed request updates you on all current tasks. Finished jobs arrive with your next request. The **gRPC Queue Monitor** optionally gives you a complete overview of all the different requests in the queue.   
+With `Queue Draw Things` on and the Draw Things App connected (locally or from other devices across your local network), **gRPC Proxy** immediately releases the UI after scheduling a generation task by returning an image as a receipt. You can continue scheduling additional tasks and put them on the queue instead of watching the progress bar of your current render. Running or recently finished generations can still be observed from the **gRPC Queue Monitor**. Re-sending an already processed request updates you on all current tasks. Finished jobs arrive with your next request. The **gRPC Queue Monitor** optionally gives you a complete overview of all the different requests in the queue.   
   
 ![grpc_monitor_queue_6](docs/images/grpc_monitor_queue_6_d.webp)  
   
 Since we cannot provide a proper UI on Draw Things App for the queuing feature, you may use a combination of the receipt the proxy returns and a prompt to control a particular task (e.g. to cancel it). Receipts are adapted to the requesting client.  
+  
+With `Queue Draw Things` off (the default), none of this happens: the Draw Things App is served like the `draw-things-cli`. The generation runs in the foreground and the app receives the final result, exactly as with the original gRPC server. The job still appears in the **gRPC Queue Monitor**, where you can cancel it and save the result.  
+  
+**With `Queue Draw Things` off, the proxy passes the output of the original gRPC server through 1:1. It neither reads nor writes any Draw Things project file.**  
   
 ### gRPC Proxy on iPhone  
   
@@ -78,11 +82,13 @@ Download the latest `.dmg` from the [releases page](https://github.com/ceveyne/d
 
 ### Step 3 — Configure Settings
 
-Choose `Choose Models Path…` and optionally `Choose Binary Path…` to set the appropriate locations.  
+`Choose Models Path…` and optionally `Choose Binary Path…` to set the appropriate locations.  
   
 If you just want to run the [gRPCServerCLI-macOS](https://github.com/drawthingsai/draw-things-community/releases), you’re ready to `Start Server`.  
   
-To use the **gRPC Queue Monitor**, it’s required to set up and enable `Use Proxy`. `Queue Monitor` brings up the **gRPC Monitor** window.  
+To use the **gRPC Queue Monitor**, it’s required to enable `Use Proxy`. `Queue Monitor` brings up the **gRPC Monitor** window.  
+  
+The menu has two groups for the proxy: `Use Proxy`, `Set Proxy Port…`, `Queue Monitor`, and `Empty Queue…` come first. Below them are the options for the experimental Draw Things App support: `Queue Draw Things`, `Issue Receipt`, and `Sync History`. They are only available while `Queue Draw Things` is on.  
   
 Configure your clients to use the configured gRPC **Proxy** Port (default: 7861) to monitor their generation.  
 Configure your clients to use the configured gRPC **Server** Port (default: 7859) to purely use the original [gRPCServerCLI-macOS](https://github.com/drawthingsai/draw-things-community/releases).  
@@ -92,7 +98,7 @@ Configure your clients to use the configured gRPC **Server** Port (default: 7859
 The gRPC **proxy** is advertised as `<your_machine> (proxy) (<your_machine>. local.)`.  
 The original gRPC **server** is advertised as `<your_machine> (<your_machine>. local.)`.  
   
-Allow gRPC Server Manager to access your Draw Things project folder if you would like to try out the app integration.  
+Allow gRPC Server Manager to access your Draw Things project folder only if you would like to try out the app integration (`Queue Draw Things` on). With `Queue Draw Things` off, the project folder is not touched and no permission is needed.  
   
 ![privacy_security_files_folders](docs/images/privacy_security_files_folders.webp)
 
@@ -138,14 +144,15 @@ Click the menu bar icon to configure:
 | **Shared Secret** | _(empty)_ | Optional authentication token |
 | **Use Proxy** | Off | Also starts the background proxy (see below) |
 | **Proxy Port** | `7861` | TCP port the app connects to when the proxy is used; must differ from the server port |
-| **Sync History** | Off | Experimental, use with care: it writes into the project history (turning it on asks for confirmation; the dialog has Cancel preselected). Passes `--sync-history` to the proxy, which then rewrites the history entries of delivered images with the data of their own jobs (prompt, seed, …); otherwise `--no-sync-history`. Applies at the next proxy start (switch **Use Proxy** off and on) |
-| **Issue Receipt** | Off (On when **Use Proxy** is turned on for the first time) | Passes `--issue-receipts` to the proxy. **Off** (formless): the laptop on this computer is served by the monitor mode and nothing is put into its history but the delivered images. **On**: the laptop on this computer is served as every other device is: a new order gets a receipt (a status image; a sound only for an order of several batches), every pickup of a running order is answered with the current status report (progress and preview), and a pickup of a finished order delivers the images followed by a delivery note (the closing status image). Nothing is deleted from the project in this mode. Applies at the next proxy start |
+| **Queue Draw Things** | Off | Experimental. Passes `--queue-draw-things` or `--no-queue-draw-things` to the proxy. **On**: the Draw Things App is queued: a generation returns at once with a receipt (a status image), runs in the background, and its results arrive with the next request (see below). **Off**: the proxy treats the Draw Things App as it treats the `draw-things-cli`: the call passes through unchanged (the output of the original gRPC server 1:1), runs in the foreground, and the app receives the final result like from the original gRPC server. No Draw Things project file is read or written, so no permission for the projects folder is needed. The job shows in the **gRPC Queue Monitor** either way, where it can be cancelled and saved. **Issue Receipt** and **Sync History** only apply while this is on. Applies at the next proxy start (switch **Use Proxy** off and on) |
+| **Issue Receipt** | On | Only with **Queue Draw Things** on. Passes `--issue-receipts` to the proxy. **Off** (formless): the laptop on this computer is served by the monitor mode and nothing is put into its history but the delivered images. **On**: the laptop on this computer is served as every other device is: a new order gets a receipt (a status image; a sound only for an order of several batches), every pickup of a running order is answered with the current status report (progress and preview), and a pickup of a finished order delivers the images followed by a delivery note (the closing status image). Nothing is deleted from the project in this mode. Applies at the next proxy start |
+| **Sync History** | Off | Experimental, use with care, only with **Queue Draw Things** on: it writes into the project history (turning it on asks for confirmation; the dialog has Cancel preselected). Passes `--sync-history` to the proxy, which then rewrites the history entries of delivered images with the data of their own jobs (prompt, seed, …); otherwise `--no-sync-history`. Applies at the next proxy start (switch **Use Proxy** off and on) |
 | **Weights Cache Size** | Disabled | VRAM reserved for model weights: Disabled / 8 / 16 / 24 / 32 GiB |
 | **Launch at Login** | Off | Start the manager automatically on login |
 
-**Check marks.** A check mark says what is on now and what is on again at the next start of the manager: every setting is remembered. **Start Server** and **Stop Server** are a pair, and one of them is always checked (a checked **Stop Server** means that nothing is started with the manager). **Queue Monitor** is checked while its window is open, and closing the window turns it off, as turning it off closes the window. With **Use Proxy** off, the other proxy items (Proxy Port, Sync History, Issue Receipt, Queue Monitor, Empty Queue) are dimmed; their check marks stay as they are.
+**Check marks.** A check mark says what is on now and what is on again at the next start of the manager: every setting is remembered. **Start Server** and **Stop Server** are a pair, and one of them is always checked (a checked **Stop Server** means that nothing is started with the manager). **Queue Monitor** is checked while its window is open, and closing the window turns it off, as turning it off closes the window. With **Use Proxy** off, the other proxy items (Proxy Port, Queue Monitor, Empty Queue, Queue Draw Things, Issue Receipt, Sync History) are dimmed; their check marks stay as they are. **Issue Receipt** and **Sync History** are also dimmed while **Queue Draw Things** is off.
 
-**The first time Use Proxy is turned on**, the proxy is set up as follows: Proxy Port 7861, Sync History off, Issue Receipt on, and the Queue Monitor window opens (at the top right of the screen, as long as no position of it is remembered).
+**The first time Use Proxy is turned on**, the Queue Monitor window opens (at the top right of the screen, as long as no position of it is remembered). The defaults of the proxy are Proxy Port 7861, Queue Draw Things off, Issue Receipt on, and Sync History off.
 
 ---
 
@@ -169,11 +176,11 @@ Same with [draw-things-cli](https://github.com/drawthingsai/draw-things-communit
   
 Third-party clients have not been tested yet, but are expected to receive all results from the original [gRPCServerCLI-macOS](https://github.com/drawthingsai/draw-things-community/releases) through the gRPC proxy unchanged (as long as they advertise themselves correctly and do not pretend to be the Draw Things app). By pointing their config to the proxy, you receive queue monitoring as a reward.
   
-> For the Draw Things App (Desktop / Laptop, Mobile Device) the gRPC Proxy changes the behavior *substantially*. If you want to use gRPC queuing and monitoring, you must point the config to the **Proxy** Port (default: 7861). If you want to use the traditional direct generation, you must point the config to the **Server** Port (default: 7859).
+> For the Draw Things App (Desktop / Laptop, Mobile Device) the gRPC Proxy changes the behavior *substantially* **only with `Queue Draw Things` on**. If you want to use gRPC queuing, you must turn it on and point the config to the **Proxy** Port (default: 7861). With `Queue Draw Things` off, pointing the app to the **Proxy** Port only adds the queue monitoring, and the app behaves as with the original gRPC server. If you want to use the traditional direct generation without the proxy, point the config to the **Server** Port (default: 7859).
   
 ### Issue Receipt  
   
-On the desktop machine that runs the **gRPC proxy**, you can choose between `Issue Receipt` on or off.   
+`Issue Receipt` is available when `Queue Draw Things` is on. On the desktop machine that runs the **gRPC proxy**, you can choose between `Issue Receipt` on or off.   
 > 💡 It’s recommended to turn this `on` to get familiar with the proxy’s behavior.
   
 Receipts are used internally to correctly identify the right job for status, cancellation, and delivery requests. So receipts are the best way to ensure the proxy is working as expected – even without using the **gRPC Queue Monitor**.
@@ -184,7 +191,7 @@ To avoid this, you may want to set `Issue Receipt` off. As receipts never appear
   
 ### Sync History  
   
-Generating traditionally ensures automatically that the results are stored with their respective metadata. Generating with **gRPC Proxy** allows you to queue multiple tasks from different clients and projects, which may easily end up in great chaos. Depending on `Batch Size`, `Batch Count`, and `Issue Receipt` on or off, it may be necessary to rewrite the Version History on delivery to keep everything aligned.
+Generating traditionally ensures automatically that the results are stored with their respective metadata. Generating with **gRPC Proxy** allows you to queue multiple tasks from different clients and projects, which may easily end up in great chaos. `Sync History` is available when `Queue Draw Things` is on. Depending on `Batch Size`, `Batch Count`, and `Issue Receipt` on or off, it may be necessary to rewrite the Version History on delivery to keep everything aligned.
   
 > ⚠️ Please be aware that enabling this is risky since it requires write access to your projects. We strongly recommend using only dedicated, newly created projects with that option. This experimental feature is for evaluation purposes only – it is not released for production.
   

@@ -192,6 +192,13 @@ struct ProxyCommand: ParsableCommand {
   )
   var issueReceipts = false
 
+  @Flag(
+    inversion: .prefixedNo,
+    help:
+      "Queue the Draw Things app: receipts, status images and background delivery. Off: the app is served like draw-things-cli, its calls pass through unchanged and the final result comes with the call; the jobs still show in the queue monitor, where they can be cancelled and saved."
+  )
+  var queueDrawThings = true
+
   @Option(help: "With --probe-history: positions of the receipts, for example 0,1,2.")
   var historyReceipts: String = ""
   @Option(help: "With --probe-history: positions of the delivered results, in the same order as the receipts.")
@@ -333,7 +340,9 @@ struct ProxyCommand: ParsableCommand {
     let upstream = try Upstream(
       host: upstreamAddress, port: upstreamPort, TLS: !noTLS || forceUpstreamTLS, group: group)
     var locator: ProjectLocator? = nil
-    if projectsDirectory.lowercased() != "none" {
+    if !queueDrawThings {
+      logger.info("Queue Draw Things is off: the Draw Things projects are neither read nor written")
+    } else if projectsDirectory.lowercased() != "none" {
       var isDirectory: ObjCBool = false
       if FileManager.default.fileExists(atPath: projectsDirectory, isDirectory: &isDirectory), isDirectory.boolValue {
         let candidate = ProjectLocator(directory: projectsDirectory, logger: logger)
@@ -381,6 +390,8 @@ struct ProxyCommand: ParsableCommand {
 
     if stateDirectory.lowercased() != "none" { service.stateDirectoryPath = stateDirectory }
     service.issueReceipts = issueReceipts
+    service.queueDrawThings = queueDrawThings
+    logger.info("Draw Things app: \(queueDrawThings ? "queued (receipts, status images, background delivery)" : "passed through like the CLI (--no-queue-draw-things)")")
     service.thirdPartyUsers = Set(thirdPartyUsers)
     service.localAppNames = ProxyService.ownNames().union(appUsers.map { $0.lowercased() })
     logger.info("The app on this computer is told by the names \(service.localAppNames?.sorted().joined(separator: ", ") ?? "-"); another laptop client on this computer passes through")
