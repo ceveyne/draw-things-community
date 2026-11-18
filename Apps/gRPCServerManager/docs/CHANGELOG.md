@@ -5,6 +5,7 @@ Notable changes to this project will be documented in this file.
 ## Distribution
 
 - **Source Code and Documentation:** [GitHub Repository](https://github.com/ceveyne/draw-things-community/tree/main/Apps/gRPCServerManager)  
+- **Releases:** [gRPC Server Manager Releases](https://github.com/ceveyne/draw-things-community/releases)  
 
 ---
 

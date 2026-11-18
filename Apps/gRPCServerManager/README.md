@@ -4,6 +4,9 @@ A lightweight macOS menu bar app that starts, stops, and monitors the Draw Thing
 
 **Requires macOS 13 (Ventura) or later and Apple Silicon.**
 
+- **Source Code and Documentation:** [GitHub Repository](https://github.com/ceveyne/draw-things-community/tree/main/Apps/gRPCServerManager)  
+- **Releases:** [gRPC Server Manager Releases](https://github.com/ceveyne/draw-things-community/releases)  
+
 ---
 
 ## What it does
