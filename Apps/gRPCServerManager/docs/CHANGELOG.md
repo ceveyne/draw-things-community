@@ -9,6 +9,14 @@ Notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.2] - 2026-11-19
+
+### Changed
+
+- Queue Monitor: the details overlay of a job is no longer triggered over the `…` button, and it closes when the pointer moves onto it.
+
+---
+
 ## [0.1.1] - 2026-11-18
 
 ### Changed

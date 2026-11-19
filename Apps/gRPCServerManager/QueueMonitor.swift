@@ -735,12 +735,19 @@ final class MonitorRowView: NSTableCellView {
     private var detailText = ""
     private var tipTimer: Timer?
 
+    private var hoverRect = NSRect.zero
+
+    private func currentHoverRect() -> NSRect {
+        NSRect(x: 0, y: 0, width: max(bounds.width - Self.plateInset - 40, 0), height: bounds.height)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for area in trackingAreas { removeTrackingArea(area) }
+        hoverRect = currentHoverRect()
         addTrackingArea(
             NSTrackingArea(
-                rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self,
+                rect: hoverRect, options: [.mouseEnteredAndExited, .activeAlways], owner: self,
                 userInfo: nil))
     }
 
@@ -803,6 +810,7 @@ final class MonitorRowView: NSTableCellView {
 
     override func layout() {
         super.layout()
+        if hoverRect != currentHoverRect() { updateTrackingAreas() }
         let height = bounds.height
         let size: CGFloat = 48
         let inset = Self.plateInset
