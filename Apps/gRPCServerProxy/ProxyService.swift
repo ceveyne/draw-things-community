@@ -161,6 +161,9 @@ final class ProxyService: ImageGenerationServiceProvider {
   private var lastPeerWasLocal: Bool? = nil
 
   private var oldPickup: (key: String, partition: String?, remaining: Int, at: Date)? = nil
+
+  private var clientLastRequestAt: [String: Date] = [:]
+  private var lastResultDeliveryAt: [String: Date] = [:]
   private var lastClosedAt: Date? = nil
   private var requestCount = 0
   private var previousSummary: RequestSummary? = nil
@@ -434,6 +437,8 @@ final class ProxyService: ImageGenerationServiceProvider {
         workdir: context.headers["x-dt-workdir"].first.flatMap { $0.removingPercentEncoding }.flatMap { $0.isEmpty ? nil : $0 },
         background: context.headers["x-dt-background"].first?.lowercased() == "true")
     }
+    let canvasFromApp = resultsWentOutSincePreviousRequest(
+      client: Self.origin(of: request, context: context)?.key ?? "local", at: received)
 
     let clientKind = "\(context.headers["user-agent"].first ?? "-") | \(request.user.isEmpty ? "-" : request.user) | \(request.device)"
     if lock.withLockCompat({ seenClients.insert(clientKind).inserted }) {
@@ -456,7 +461,7 @@ final class ProxyService: ImageGenerationServiceProvider {
     logger.info("DECISION \(number): \(isStatus ? "STATUS REQUEST" : "NEW JOB") - \(reason)")
 
     FileLog.shared.append(
-      "REQ \(number) \(request.device) \(request.user.isEmpty ? "-" : request.user) order \(Self.shortHash(Self.monitorGroupKey(of: request).key)) batchCount \(Self.monitorGroupKey(of: request).expected) image \(request.hasImage ? hex(request.image).prefix(8).description : "-") pixels \(request.contents.isEmpty ? "no" : "yes"): \(isStatus ? "STATUS" : "NEW") - \(reason)")
+      "REQ \(number) \(request.device) \(request.user.isEmpty ? "-" : request.user) order \(Self.shortHash(Self.monitorGroupKey(of: request).key)) batchCount \(Self.monitorGroupKey(of: request).expected) image \(request.hasImage ? hex(request.image).prefix(8).description : "-") pixels \(request.contents.isEmpty ? "no" : "yes"), inputs [\(Self.inputsSummary(of: request))]: \(isStatus ? "STATUS" : "NEW") - \(reason)")
     guard background else {
       return relay(number: number, request: request, context: context)
     }
@@ -473,10 +478,10 @@ final class ProxyService: ImageGenerationServiceProvider {
     if request.device == .laptop, local, monitor?.isActive == true, !issueReceipts {
       return monitorRequest(
         number: number, request: request, received: received, pickupOnly: isStatus, receipt: match,
-        context: context)
+        canvasFromApp: canvasFromApp, context: context)
     }
 
-    if !isStatus, let pickup = sameOrderInQueue(request: request, origin: origin, at: received) {
+    if !isStatus, let pickup = sameOrderInQueue(request: request, origin: origin, at: received, canvasFromApp: canvasFromApp) {
       isStatus = true
       match = pickup.entry
       reason = pickup.reason
@@ -609,6 +614,67 @@ final class ProxyService: ImageGenerationServiceProvider {
       hasMask: request.hasMask, hintTypes: request.hints.map { $0.hintType })
   }
 
+  struct Inputs: Equatable {
+    var canvas: Data?
+    var mask: Data?
+    var hints: [String]
+  }
+
+  static func inputs(of request: ImageGenerationRequest) -> Inputs {
+    let hints = request.hints.map { hint -> String in
+      let tensors = hint.tensors.map { "\(hex($0.tensor))@\($0.weight)" }.sorted().joined(separator: ",")
+      return "\(hint.hintType)[\(tensors)]"
+    }.sorted()
+    return Inputs(canvas: canvasInput(of: request), mask: request.hasMask ? request.mask : nil, hints: hints)
+  }
+
+  static func inputsSummary(of request: ImageGenerationRequest) -> String {
+    let inputs = Self.inputs(of: request)
+    let contents = request.contents.map { hex(Data(SHA256.hash(data: $0))).prefix(8).description }.joined(separator: ",")
+    return "canvas \(inputs.canvas.map { hex($0).prefix(8).description } ?? "-"), contents \(contents.isEmpty ? "-" : contents), mask \(inputs.mask.map { hex($0).prefix(8).description } ?? "-"), hints \(inputs.hints.isEmpty ? "-" : inputs.hints.map { Self.shortHint($0) }.joined(separator: ";"))"
+  }
+
+  private static func shortHint(_ hint: String) -> String {
+    guard let open = hint.firstIndex(of: "["), hint.hasSuffix("]") else { return hint }
+    let tensors = hint[hint.index(after: open)..<hint.index(before: hint.endIndex)].split(separator: ",").map { entry -> String in
+      let parts = entry.split(separator: "@", maxSplits: 1)
+      return (parts.first.map { String($0.prefix(8)) } ?? "") + (parts.count > 1 ? "@" + parts[1] : "")
+    }
+    return "\(hint[..<open])[\(tensors.joined(separator: ","))]"
+  }
+
+  static func canvasInput(of request: ImageGenerationRequest) -> Data? {
+    guard request.hasImage, !request.contents.isEmpty else { return nil }
+    return request.contents.contains { Data(SHA256.hash(data: $0)) == request.image } ? request.image : nil
+  }
+
+  static func inputsChanged(of group: Group, in request: ImageGenerationRequest, byApp: Bool) -> Bool {
+    guard let theirs = group.inputs else { return false }
+    let mine = inputs(of: request)
+
+    if let a = theirs.mask, let b = mine.mask, a != b { return true }
+    if theirs.hints.filter(isUserHint) != mine.hints.filter(isUserHint) { return true }
+
+    guard !byApp else { return false }
+    if let a = theirs.canvas, let b = mine.canvas, a != b { return true }
+    return theirs.hints != mine.hints
+  }
+
+  private static func isUserHint(_ hint: String) -> Bool { hint.hasPrefix("shuffle[") }
+
+  private func resultsWentOutSincePreviousRequest(client: String, at time: Date) -> Bool {
+    lock.withLockCompat {
+      let previous = clientLastRequestAt[client]
+      clientLastRequestAt[client] = time
+      guard let previous = previous, let delivered = lastResultDeliveryAt[client] else { return false }
+      return delivered > previous
+    }
+  }
+
+  private func noteResultDelivery(client: String, at time: Date) {
+    lock.withLockCompat { lastResultDeliveryAt[client] = time }
+  }
+
   static func orderKey(
     prompt: String, negativePrompt: String, configuration data: Data, hasMask: Bool, hintTypes: [String]
   ) -> (key: String, expected: Int) {
@@ -646,6 +712,7 @@ final class ProxyService: ImageGenerationServiceProvider {
       let group = existing ?? Group(code: makeUniqueCode(), key: key, expected: expected)
       if existing == nil {
         group.origin = origin
+        group.inputs = Self.inputs(of: request)
         groups.append(group)
       }
       let job = Job(group: group, request: request)
@@ -832,6 +899,7 @@ final class ProxyService: ImageGenerationServiceProvider {
       delivered.append((candidate, responses))
       imageCount += waiting
     }
+    if !delivered.isEmpty { noteResultDelivery(client: askerOrigin?.key ?? "local", at: Date()) }
 
     if !delivered.isEmpty, monitor?.isActive != true { cleanDelivered() }
     let heldBack = allGroups.filter { !mayDeliver($0) }.reduce(0) { $0 + $1.jobs.filter { $0.undeliveredImageCount > 0 }.count }
@@ -1671,7 +1739,7 @@ extension ProxyService {
 
   private func monitorRequest(
     number: Int, request: ImageGenerationRequest, received: Date, pickupOnly: Bool = false,
-    receipt: StatusRegistry.Entry? = nil,
+    receipt: StatusRegistry.Entry? = nil, canvasFromApp: Bool = false,
     context: StreamingResponseCallContext<ImageGenerationResponse>
   ) -> EventLoopFuture<GRPCStatus> {
     let open = locator?.openProjectNames()
@@ -1692,7 +1760,7 @@ extension ProxyService {
       return "\(group.code)[\(name), \(inQueue(group) ? "in queue" : "over"), order \(Self.shortHash(group.key)), runs \(runs.joined(separator: "/"))]"
     }.joined(separator: " ")
     let decision =
-      "MONITOR \(number): open in Draw Things \(open.map { "\($0)" } ?? "unknown"), project taken as \(project ?? "unknown"); this order \(Self.shortHash(key)), canvas pixels \(request.contents.isEmpty ? "no" : "yes"), image \(request.hasImage ? hex(request.image) : "-"); requests: \(overview.isEmpty ? "none" : overview)"
+      "MONITOR \(number): open in Draw Things \(open.map { "\($0)" } ?? "unknown"), project taken as \(project ?? "unknown"); this order \(Self.shortHash(key)), canvas pixels \(request.contents.isEmpty ? "no" : "yes"), inputs [\(Self.inputsSummary(of: request))], results delivered since the previous request \(canvasFromApp ? "yes" : "no"), image \(request.hasImage ? hex(request.image) : "-"); requests: \(overview.isEmpty ? "none" : overview)"
     logger.info("\(decision)")
     FileLog.shared.append(decision)
 
@@ -1703,6 +1771,7 @@ extension ProxyService {
       subject.info = Loc.t("Project unknown: nothing was started.", "Projekt unbekannt: Es wurde nichts gestartet.")
       return respondWithStatusImage(subject: subject, context: context)
     }
+    var anotherCanvas: Group? = nil
     let (followUp, sameOrder, restOfPickup): (Bool, Group?, Bool) = lock.withLockCompat {
       if pickupOnly { return (false, nil, false) }
       if let pickup = monitorPickup, pickup.key == key, pickup.remaining > 0,
@@ -1714,7 +1783,9 @@ extension ProxyService {
       if groups.contains(where: { $0.canTake(key: key, at: received, window: burstWindow) }) {
         return (true, nil, false)
       }
-      let same = groups.first { $0.key == key && inProject($0, project) && inQueue($0) }
+      let candidates = groups.filter { $0.key == key && inProject($0, project) && inQueue($0) }
+      let same = candidates.first { !Self.inputsChanged(of: $0, in: request, byApp: canvasFromApp) }
+      if same == nil { anotherCanvas = candidates.first }
       if same != nil { monitorPickup = (key, expected - 1, received) }
       return (false, same, false)
     }
@@ -1726,6 +1797,9 @@ extension ProxyService {
     } else if let same = sameOrder {
       monitorLog("MONITOR \(number): the same order as \(same.code) in \(project.map { Self.projectLabel($0) } ?? "the open project"), nothing started")
     } else {
+      if let other = anotherCanvas {
+        monitorLog("MONITOR \(number): the same data as \(other.code), but other images (canvas, mask or hints) and nothing was delivered since the last request: a new order")
+      }
       let (job, isNew) = startJob(request, at: received, project: project, monitorMode: true)
       monitorLog("MONITOR \(number): \(followUp ? "run \(job.runIndex) of" : "order") \(job.code) started in \(project.map { Self.projectLabel($0) } ?? "an unknown project")")
 
@@ -1759,6 +1833,7 @@ extension ProxyService {
     let sentAt = Date()
     let codes = Array(Set(delivered.map { $0.job.code })).sorted()
     if !delivered.isEmpty {
+      noteResultDelivery(client: "local", at: Date())
       monitorLog("MONITOR \(number): delivering \(imageCount) \(imageCount == 1 ? "image" : "images") of \(codes.joined(separator: ", ")); history nodes \(historyFixer != nil ? "are rebuilt from the requests of the jobs" : "are left as the app makes them (Fix History is off)")")
 
       fixerItems = delivered.map { entry -> HistoryFixer.Item in
@@ -2174,7 +2249,7 @@ extension ProxyService {
   }
 
   private func sameOrderInQueue(
-    request: ImageGenerationRequest, origin: Group.Origin?, at time: Date
+    request: ImageGenerationRequest, origin: Group.Origin?, at time: Date, canvasFromApp: Bool
   ) -> (entry: StatusRegistry.Entry?, reason: String)? {
     let (key, expected) = Self.monitorGroupKey(of: request)
     return lock.withLockCompat { () -> (StatusRegistry.Entry?, String)? in
@@ -2187,7 +2262,9 @@ extension ProxyService {
       }
       if mine.contains(where: { $0.canTake(key: key, at: time, window: burstWindow) }) { return nil }
 
-      let matching = mine.filter { $0.key == key && inQueue($0) }
+      let matching = mine.filter {
+        $0.key == key && inQueue($0) && !Self.inputsChanged(of: $0, in: request, byApp: canvasFromApp)
+      }
       guard let same = matching.last else { return nil }
       oldPickup = (key, origin?.key, expected - 1, time)
       var entry =

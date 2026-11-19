@@ -55,6 +55,8 @@ final class Group {
   }
   var origin: Origin? = nil
 
+  var inputs: ProxyService.Inputs? = nil
+
   var shelved = false
 
   struct ToolInfo: Codable, Equatable {

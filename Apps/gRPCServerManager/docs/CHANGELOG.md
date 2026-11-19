@@ -15,6 +15,10 @@ Notable changes to this project will be documented in this file.
 
 - Queue Monitor: the details overlay of a job is no longer triggered over the `…` button, and it closes when the pointer moves onto it.
 
+### Fixed
+
+- **Queue Draw Things:** a request whose only difference is an image that feeds the generation is a new job now: a moodboard image or its weight, the mask, the canvas image (Image2Image, edit, image to video), or a control image. Before, it was taken for a repeat of the job that was already in the queue. A moodboard or mask change always counts. The canvas image (and controls the app may make from it) count only if nothing was delivered to the client since its previous request, because the app puts the image it received last on the canvas; the canvas image also only if its pixels are sent with the request.
+
 ---
 
 ## [0.1.1] - 2026-11-18

@@ -470,6 +470,108 @@ extension ProxyCommand {
     let cliRow = rowsNow().first { $0["project"] as? String == "draw-things-cli" }
     check("and shows in the monitor under its own name, like our tools", cliRow != nil && cliRow?["tool"] as? Bool == true, "\(String(describing: cliRow?["project"]))")
 
+    func started(_ prompt: String, expecting: Int) -> Int {
+      let end = Date().addingTimeInterval(3)
+      while fake.prompts.filter({ $0 == prompt }).count < expecting, Date() < end { Thread.sleep(forTimeInterval: 0.05) }
+      Thread.sleep(forTimeInterval: 0.5)
+      return fake.prompts.filter { $0 == prompt }.count
+    }
+    func canvasConfiguration(seed: UInt32) -> Data {
+      var fbb = FlatBufferBuilder()
+      let model = fbb.create(string: "canvas.ckpt")
+      let root = zzz_DflatGen_GenerationConfiguration.createGenerationConfiguration(
+        &fbb, startWidth: 8, startHeight: 8, seed: seed, steps: 4, modelOffset: model, batchCount: 1)
+      fbb.finish(offset: root)
+      return Data(fbb.sizedByteArray)
+    }
+    func canvasPixels(_ shade: Float) -> (data: Data, hash: Data) {
+      var tensor = Tensor<FloatType>(.CPU, .NHWC(1, 64, 96, 3))
+      for y in 0..<64 { for x in 0..<96 { for c in 0..<3 { tensor[0, y, x, c] = FloatType(Float(x) / 96 * shade - 0.5) } } }
+      let data = tensor.data(using: [.zip, .fpzip])
+      return (data, Data(SHA256.hash(data: data)))
+    }
+    func withCanvas(_ prompt: String, _ shade: Float, device: DeviceType, user: String, seed: UInt32) -> ImageGenerationRequest {
+      var canvasRequest = request(prompt, device: device, user: user)
+      canvasRequest.configuration = canvasConfiguration(seed: seed)
+      let pixels = canvasPixels(shade)
+      canvasRequest.image = pixels.hash
+      canvasRequest.contents = [pixels.data]
+      return canvasRequest
+    }
+
+    let sameCanvasPrompt = "canvas-same"
+    _ = run(proxied, sameCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(sameCanvasPrompt, 0.4, device: .phone, user: "Phone C", seed: 1))
+    _ = run(proxied, sameCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(sameCanvasPrompt, 0.4, device: .phone, user: "Phone C", seed: 2))
+    check("canvas: the same data and the same canvas image (another seed) starts no job", started(sameCanvasPrompt, expecting: 2) == 1, "\(fake.prompts.filter { $0 == sameCanvasPrompt }.count) started")
+    let otherCanvasPrompt = "canvas-other"
+    _ = run(proxied, otherCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(otherCanvasPrompt, 0.4, device: .phone, user: "Phone C", seed: 1))
+    _ = run(proxied, otherCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(otherCanvasPrompt, 0.9, device: .phone, user: "Phone C", seed: 1))
+    check("canvas: only the canvas image is another one: a new job", started(otherCanvasPrompt, expecting: 2) == 2, "\(fake.prompts.filter { $0 == otherCanvasPrompt }.count) started")
+
+    func withHint(_ prompt: String, images: [String], weight: Float = 1, mask: String? = nil, seed: UInt32) -> ImageGenerationRequest {
+      var hinted = request(prompt, device: .phone, user: "Phone C")
+      hinted.configuration = canvasConfiguration(seed: seed)
+      hinted.hints = [HintProto.with {
+        $0.hintType = "shuffle"
+        $0.tensors = images.map { name in TensorAndWeight.with { $0.tensor = Data(SHA256.hash(data: Data(name.utf8))); $0.weight = weight } }
+      }]
+      if let mask = mask { hinted.mask = Data(SHA256.hash(data: Data(mask.utf8))) }
+      return hinted
+    }
+    let sameHintPrompt = "hint-same"
+    _ = run(proxied, sameHintPrompt, device: .phone, user: "Phone C", base: withHint(sameHintPrompt, images: ["a", "b"], seed: 1))
+    _ = run(proxied, sameHintPrompt, device: .phone, user: "Phone C", base: withHint(sameHintPrompt, images: ["b", "a"], seed: 2))
+    check("moodboard: the same images (in another order, another seed) start no job", started(sameHintPrompt, expecting: 2) == 1, "\(fake.prompts.filter { $0 == sameHintPrompt }.count) started")
+    let otherHintPrompt = "hint-other"
+    _ = run(proxied, otherHintPrompt, device: .phone, user: "Phone C", base: withHint(otherHintPrompt, images: ["a", "b"], seed: 1))
+    _ = run(proxied, otherHintPrompt, device: .phone, user: "Phone C", base: withHint(otherHintPrompt, images: ["a", "c"], seed: 1))
+    check("moodboard: only an image of it is another one: a new job", started(otherHintPrompt, expecting: 2) == 2, "\(fake.prompts.filter { $0 == otherHintPrompt }.count) started")
+    _ = run(proxied, otherHintPrompt, device: .phone, user: "Phone C", base: withHint(otherHintPrompt, images: ["a", "c"], seed: 2))
+    check("moodboard: the changed moodboard sent again is a repeat of that new job", started(otherHintPrompt, expecting: 3) == 2, "\(fake.prompts.filter { $0 == otherHintPrompt }.count) started")
+    let weightPrompt = "hint-weight"
+    _ = run(proxied, weightPrompt, device: .phone, user: "Phone C", base: withHint(weightPrompt, images: ["a"], weight: 1, seed: 1))
+    _ = run(proxied, weightPrompt, device: .phone, user: "Phone C", base: withHint(weightPrompt, images: ["a"], weight: 0.5, seed: 1))
+    check("moodboard: only the weight of an image is another one: a new job", started(weightPrompt, expecting: 2) == 2, "\(fake.prompts.filter { $0 == weightPrompt }.count) started")
+    let maskPrompt = "mask-other"
+    _ = run(proxied, maskPrompt, device: .phone, user: "Phone C", base: withHint(maskPrompt, images: ["a"], mask: "m1", seed: 1))
+    _ = run(proxied, maskPrompt, device: .phone, user: "Phone C", base: withHint(maskPrompt, images: ["a"], mask: "m2", seed: 1))
+    check("mask: only the mask is another one: a new job", started(maskPrompt, expecting: 2) == 2, "\(fake.prompts.filter { $0 == maskPrompt }.count) started")
+
+    let queuedGroup = Group(code: "zz", key: "k", expected: 1)
+    let sameCanvas = withCanvas("p", 0.4, device: .laptop, user: "", seed: 1)
+    let otherCanvas = withCanvas("p", 0.9, device: .laptop, user: "", seed: 1)
+    queuedGroup.inputs = ProxyService.inputs(of: sameCanvas)
+    var noPixels = otherCanvas
+    noPixels.contents = []
+    check("inputs: another image is a change, the same image is not", ProxyService.inputsChanged(of: queuedGroup, in: otherCanvas, byApp: false)
+      && !ProxyService.inputsChanged(of: queuedGroup, in: sameCanvas, byApp: false), "")
+    check("inputs: after a delivery the image on the canvas is the one the app put there, not a change", !ProxyService.inputsChanged(of: queuedGroup, in: otherCanvas, byApp: true), "")
+    check("inputs: Text2Image names an image but sends no pixels, it never counts", !ProxyService.inputsChanged(of: queuedGroup, in: noPixels, byApp: false)
+      && ProxyService.canvasInput(of: noPixels) == nil, "")
+    let textOnly = Group(code: "yy", key: "k", expected: 1)
+    check("inputs: an order that has no inputs recorded is never told apart", !ProxyService.inputsChanged(of: textOnly, in: otherCanvas, byApp: false), "")
+    let hintedGroup = Group(code: "xx", key: "k", expected: 1)
+    hintedGroup.inputs = ProxyService.inputs(of: withHint("p", images: ["a"], seed: 1))
+    check("inputs: a moodboard that changed is a change, the same moodboard is not",
+      ProxyService.inputsChanged(of: hintedGroup, in: withHint("p", images: ["z"], seed: 1), byApp: false)
+        && !ProxyService.inputsChanged(of: hintedGroup, in: withHint("p", images: ["a"], seed: 9), byApp: false), "")
+
+    check("inputs: after a delivery a changed moodboard still is a change, a changed canvas is not",
+      ProxyService.inputsChanged(of: hintedGroup, in: withHint("p", images: ["z"], seed: 1), byApp: true)
+        && !ProxyService.inputsChanged(of: hintedGroup, in: withHint("p", images: ["a"], seed: 9), byApp: true)
+        && !ProxyService.inputsChanged(of: queuedGroup, in: otherCanvas, byApp: true), "")
+    let maskedGroup = Group(code: "ww", key: "k", expected: 1)
+    maskedGroup.inputs = ProxyService.inputs(of: withHint("p", images: ["a"], mask: "m1", seed: 1))
+    check("inputs: after a delivery a changed mask still is a change", ProxyService.inputsChanged(of: maskedGroup, in: withHint("p", images: ["a"], mask: "m2", seed: 1), byApp: true), "")
+    var depthRequest = withHint("p", images: ["a"], seed: 1)
+    depthRequest.hints[0].hintType = "depth"
+    let depthGroup = Group(code: "vv", key: "k", expected: 1)
+    depthGroup.inputs = ProxyService.inputs(of: depthRequest)
+    var otherDepth = withHint("p", images: ["q"], seed: 1)
+    otherDepth.hints[0].hintType = "depth"
+    check("inputs: a control the app may make from the canvas does not count after a delivery, and does without one",
+      !ProxyService.inputsChanged(of: depthGroup, in: otherDepth, byApp: true) && ProxyService.inputsChanged(of: depthGroup, in: otherDepth, byApp: false), "")
+
     service.queueDrawThings = false
     let appCalled = run(proxied, "ok", user: "")
     check("Queue Draw Things off: the app gets the frames of the real server and nothing else", appCalled.frames == expected.frames, "(\(appCalled.frames.count) of \(expected.frames.count))")
