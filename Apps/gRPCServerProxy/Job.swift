@@ -57,6 +57,8 @@ final class Group {
 
   var inputs: ProxyService.Inputs? = nil
 
+  var canvasData: Data? = nil
+
   var shelved = false
 
   struct ToolInfo: Codable, Equatable {
@@ -137,6 +139,16 @@ final class Group {
   func close() { lock.withLock { _closed = true } }
 }
 
+final class SessionTimings {
+  static let shared = SessionTimings()
+  private let lock = NSLock()
+  private var decode: [String: TimeInterval] = [:]
+
+  func tailSeconds(for key: String) -> TimeInterval? { lock.withLock { decode[key] } }
+  func recordTail(_ seconds: TimeInterval, for key: String) { lock.withLock { decode[key] = seconds } }
+  func reset() { lock.withLock { decode.removeAll() } }
+}
+
 final class Job {
   let id: UUID
   let group: Group
@@ -157,12 +169,20 @@ final class Job {
 
   let mode: String?
 
+  private(set) var timingKey = ""
+
   private let lock = NSLock()
   private var _state: JobState = .queued
   private var _phase = "Pending"
   private var _stage: Stage = .processing
   private var _step: Int? = nil
-  private var _stepTimes: [Date] = []
+  private var _stepTimes: [(step: Int, at: Date)] = []
+
+  private var _plannedSteps: Int? = nil
+  private var _plannedSecondSteps: Int? = nil
+  private var _secondPass = false
+  private var _tailSince: Date? = nil
+  private var _decodedAt: Date? = nil
   private var _startedAt: Date? = nil
   private var _finishedAt: Date? = nil
   private var _lastPreview: Data? = nil
@@ -183,6 +203,9 @@ final class Job {
     var stage: Stage
     var phase: String
     var step: Int?
+
+    var totalSteps: Int
+    var secondPass: Bool
     var startedAt: Date?
     var finishedAt: Date?
     var etaSeconds: Double?
@@ -205,6 +228,7 @@ final class Job {
     requestConfiguration = request.configuration
     negativePrompt = request.negativePrompt
     mode = request.hasImage ? "edit" : "text2image"
+    timingKey = "\(model)|\(width)x\(height)|\(batchSize)|\(mode ?? "")|\(configuration.numFrames)"
   }
 
   func attachSpool(_ directory: URL?) {
@@ -346,25 +370,67 @@ final class Job {
     }
   }
 
+  var producesVideo: Bool {
+    let payload = self.payload
+    return MediaSaver.isVideo(
+      completeImages: payload.completeImages, hasAudio: payload.hasAudio, configuration: requestConfiguration, model: model)
+  }
+
   var lastPreview: Data? { lock.withLock { _lastPreview } }
+
+  private var tailKey: String { timingKey + (_secondPass ? "#2" : (_plannedSecondSteps != nil ? "#1" : "")) }
 
   func snapshot(now: Date = Date()) -> Snapshot {
     lock.withLock {
+      let passSteps = _secondPass ? (_plannedSecondSteps ?? 0) : (_plannedSteps ?? totalSteps)
+      let tail = SessionTimings.shared.tailSeconds(for: tailKey)
       var eta: Double? = nil
-      if let step = _step, _stepTimes.count >= 2, totalSteps > step {
-        let elapsed = _stepTimes.last!.timeIntervalSince(_stepTimes.first!)
-        let perStep = elapsed / Double(_stepTimes.count - 1)
-        eta = perStep * Double(totalSteps - step)
+      if let since = _tailSince, let tail = tail {
+        let left = tail - now.timeIntervalSince(since)
+        if left > 0 { eta = left }
+      } else if _stage == .sampling, let step = _step, let first = _stepTimes.first, let last = _stepTimes.last,
+        last.step > first.step, passSteps >= step
+      {
+        let perStep = last.at.timeIntervalSince(first.at) / Double(last.step - first.step)
+        eta = perStep * Double(passSteps - step) + (tail ?? perStep * 0.5)
       }
       return Snapshot(
         state: _state, stage: _stage,
-        phase: _downloadProgress ?? _phase, step: _step, startedAt: _startedAt,
+        phase: _downloadProgress ?? _phase, step: _step, totalSteps: passSteps, secondPass: _secondPass,
+        startedAt: _startedAt,
         finishedAt: _finishedAt, etaSeconds: eta, hasPreview: _lastPreview != nil,
         delivered: _delivered)
     }
   }
 
-  func consume(_ response: ImageGenerationResponse) {
+  private func sampled(step: Int, of passSteps: Int, at now: Date) {
+    _stage = .sampling
+    if step >= 1 {
+      if let previous = _step, step <= previous { _stepTimes = [] }
+      _stepTimes.append((step, now))
+    }
+    _step = step
+    if passSteps > 0, step >= passSteps { _tailSince = now }
+  }
+
+  private func decoded(at now: Date) {
+    _decodedAt = now
+    if let since = _tailSince, !_secondPass, _plannedSecondSteps != nil {
+      SessionTimings.shared.recordTail(now.timeIntervalSince(since), for: tailKey)
+    }
+    _stage = .finishing
+  }
+
+  private func startSecondPass() {
+    guard !_secondPass else { return }
+    _secondPass = true
+    _step = nil
+    _stepTimes = []
+    _tailSince = nil
+    _decodedAt = nil
+  }
+
+  func consume(_ response: ImageGenerationResponse, at now: Date = Date()) {
     lock.withLock {
       if case .queued = _state, response.hasCurrentSignpost || response.hasRemoteDownload {
         _state = .running
@@ -372,8 +438,18 @@ final class Job {
       }
       if response.hasRemoteDownload {
         let download = response.remoteDownload
-        _downloadProgress =
-          "Downloading files \(download.item)/\(download.itemsExpected)"
+        var text = "Downloading files \(download.item)/\(download.itemsExpected)"
+        if download.bytesExpected > 0 {
+          text += " \u{00B7} \(min(Int(download.bytesReceived * 100 / download.bytesExpected), 100))%"
+        }
+        _downloadProgress = text
+      }
+      for announced in response.signposts {
+        switch announced.signpost {
+        case .sampling(let sampling): _plannedSteps = max(_plannedSteps ?? 0, Int(sampling.step))
+        case .secondPassSampling(let sampling): _plannedSecondSteps = max(_plannedSecondSteps ?? 0, Int(sampling.step))
+        default: break
+        }
       }
       if response.hasCurrentSignpost {
         _downloadProgress = nil
@@ -386,23 +462,21 @@ final class Job {
           _stage = .processing
         case .sampling(let sampling):
           _phase = "Sampling"
-          _stage = .sampling
-          _step = Int(sampling.step)
-          _stepTimes.append(Date())
+          sampled(step: Int(sampling.step), of: _plannedSteps ?? totalSteps, at: now)
         case .imageDecoded:
           _phase = "Image decoded"
-          _stage = .finishing
+          decoded(at: now)
         case .secondPassImageEncoded:
+          startSecondPass()
           _phase = "Second pass: image encoded"
           _stage = .processing
         case .secondPassSampling(let sampling):
+          startSecondPass()
           _phase = "Second pass: sampling"
-          _stage = .sampling
-          _step = Int(sampling.step)
-          _stepTimes.append(Date())
+          sampled(step: Int(sampling.step), of: _plannedSecondSteps ?? 0, at: now)
         case .secondPassImageDecoded:
           _phase = "Second pass: image decoded"
-          _stage = .finishing
+          decoded(at: now)
         case .faceRestored:
           _phase = "Face restored"
           _stage = .finishing
@@ -444,10 +518,24 @@ final class Job {
     return cancelled
   }
 
-  func finish(_ result: Result<GRPCStatus, Error>) {
+  var timingReport: String {
+    lock.withLock {
+      var parts = [String]()
+      if let first = _stepTimes.first, let last = _stepTimes.last, last.step > first.step {
+        parts.append(String(format: "step %.1fs (%d..%d)", last.at.timeIntervalSince(first.at) / Double(last.step - first.step), first.step, last.step))
+      }
+      if let since = _tailSince {
+        if let decoded = _decodedAt { parts.append(String(format: "last step to decoded %.1fs", decoded.timeIntervalSince(since))) }
+        if let end = _finishedAt { parts.append(String(format: "last step to end %.1fs", end.timeIntervalSince(since))) }
+      }
+      return parts.joined(separator: ", ")
+    }
+  }
+
+  func finish(_ result: Result<GRPCStatus, Error>, at now: Date = Date()) {
     lock.withLock {
       if case .cancelled = _state { return }
-      _finishedAt = Date()
+      _finishedAt = now
       switch result {
       case .success(let status):
         if status.isOk {
@@ -462,6 +550,9 @@ final class Job {
         _state = .failed("\(error)")
       }
       _lastPreview = nil
+      if case .done = _state, let since = _tailSince {
+        SessionTimings.shared.recordTail(now.timeIntervalSince(since), for: tailKey)
+      }
     }
   }
 }

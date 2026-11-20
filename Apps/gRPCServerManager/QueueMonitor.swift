@@ -82,6 +82,7 @@ final class QueueMonitor: NSObject, NSWindowDelegate, NSTableViewDataSource, NST
 
     private var viewing: (code: String, run: Int, state: String, asked: Date)?
     private var viewerAsking = false
+    private var raiseViewer = false
     private var saves: [String: (destination: URL, directory: URL)] = [:]
     private var wanted = false
     private(set) var connected = false
@@ -527,6 +528,7 @@ final class QueueMonitor: NSObject, NSWindowDelegate, NSTableViewDataSource, NST
         guard let run = row.run, row.thumb != nil else { return }
         viewing = (row.code, run, row.state, Date())
         viewerAsking = false
+        raiseViewer = true
         askForPicture(code: row.code, run: run)
     }
 
@@ -587,7 +589,15 @@ final class QueueMonitor: NSObject, NSWindowDelegate, NSTableViewDataSource, NST
         }
         viewerImage?.image = image
         viewer?.title = title
-        guard fresh, let window = viewer else { return }
+        guard let window = viewer else { return }
+        let raise = raiseViewer
+        raiseViewer = false
+        guard fresh || raise else { return }
+        if !fresh {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
 
         let area = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? NSSize(width: 1200, height: 800)
         let size = image.size

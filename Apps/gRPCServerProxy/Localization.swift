@@ -7,6 +7,8 @@ enum Loc {
     self.german ? german : english
   }
 
+  static var secondPass: String { german ? "Zweiter Durchgang " : "Second pass " }
+
   static func stepLine(_ step: Int, _ steps: Int, _ percent: Int) -> String {
     german ? "Schritt \(step)/\(steps) (\(percent) %)" : "Step \(step)/\(steps) (\(percent)%)"
   }

@@ -52,6 +52,16 @@ private final class FakeServer: ImageGenerationServiceProvider {
         }, promise: nil)
       return context.eventLoop.makeSucceededFuture(.ok)
     }
+    if request.prompt == "clip" {
+      context.sendResponse(
+        ImageGenerationResponse.with {
+          $0.generatedImages = [image, image]
+          $0.generatedAudio = [Data([9, 9])]
+          $0.chunkState = .lastChunk
+          $0.scaleFactor = 1
+        }, promise: nil)
+      return context.eventLoop.makeSucceededFuture(.ok)
+    }
     if request.prompt == "slow" {
       let promise = context.eventLoop.makePromise(of: GRPCStatus.self)
       context.closeFuture.whenComplete { [weak self] _ in
@@ -421,7 +431,7 @@ extension ProxyCommand {
     for _ in 0..<20 where !(service.probeSnapshot()["jobs"] as? [[String: Any]] ?? []).contains(where: { $0["state"] as? String == "running" }) {
       Thread.sleep(forTimeInterval: 0.1)
     }
-    let updateFrames = run(proxied, "slow-receipt", device: .laptop, user: "", base: local("slow-receipt", seed: 2)).frames
+    let updateFrames = run(proxied, "slow-receipt", device: .laptop, user: "", base: local("slow-receipt", seed: 1)).frames
     Thread.sleep(forTimeInterval: 0.5)
     check("receipts on: a repeat while it runs starts no job", fake.prompts.filter { $0 == "slow-receipt" }.count == startedBefore + 1, "")
 
@@ -434,7 +444,7 @@ extension ProxyCommand {
     Thread.sleep(forTimeInterval: 0.5)
     _ = run(proxied, "finished-receipt", device: .laptop, user: "", base: local("finished-receipt", seed: 3))
     Thread.sleep(forTimeInterval: 1.0)
-    let noteFrames = run(proxied, "finished-receipt", device: .laptop, user: "", base: local("finished-receipt", seed: 4)).frames
+    let noteFrames = run(proxied, "finished-receipt", device: .laptop, user: "", base: local("finished-receipt", seed: 3)).frames
 
     check("receipts on: a pickup of a finished order delivers the image and a delivery note after it",
       images(noteFrames) == 3, describe(noteFrames))
@@ -501,12 +511,37 @@ extension ProxyCommand {
 
     let sameCanvasPrompt = "canvas-same"
     _ = run(proxied, sameCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(sameCanvasPrompt, 0.4, device: .phone, user: "Phone C", seed: 1))
-    _ = run(proxied, sameCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(sameCanvasPrompt, 0.4, device: .phone, user: "Phone C", seed: 2))
-    check("canvas: the same data and the same canvas image (another seed) starts no job", started(sameCanvasPrompt, expecting: 2) == 1, "\(fake.prompts.filter { $0 == sameCanvasPrompt }.count) started")
+    _ = run(proxied, sameCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(sameCanvasPrompt, 0.4, device: .phone, user: "Phone C", seed: 1))
+    check("canvas: the same data and the same canvas image (same seed) starts no job", started(sameCanvasPrompt, expecting: 2) == 1, "\(fake.prompts.filter { $0 == sameCanvasPrompt }.count) started")
     let otherCanvasPrompt = "canvas-other"
     _ = run(proxied, otherCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(otherCanvasPrompt, 0.4, device: .phone, user: "Phone C", seed: 1))
     _ = run(proxied, otherCanvasPrompt, device: .phone, user: "Phone C", base: withCanvas(otherCanvasPrompt, 0.9, device: .phone, user: "Phone C", seed: 1))
     check("canvas: only the canvas image is another one: a new job", started(otherCanvasPrompt, expecting: 2) == 2, "\(fake.prompts.filter { $0 == otherCanvasPrompt }.count) started")
+
+    func receiptMean(_ frames: [Data]) -> Float? {
+      guard let first = try? ImageGenerationResponse(serializedBytes: frames.first ?? Data()), let data = first.generatedImages.first,
+        let tensor = Tensor<FloatType>(data: data, using: [.zip, .fpzip])
+      else { return nil }
+      var sum: Float = 0
+      var count = 0
+      let shape = tensor.shape
+      let stride = max(shape[shape.count - 3] * shape[shape.count - 2] * shape[shape.count - 1] / 4000, 1)
+      tensor.withUnsafeBytes { raw in
+        guard let p = raw.baseAddress?.assumingMemoryBound(to: FloatType.self) else { return }
+        var i = 0
+        while i < tensor.shape.reduce(1, *) { sum += Float(p[i]); count += 1; i += stride }
+      }
+      return count > 0 ? sum / Float(count) : nil
+    }
+    let plainReceipt = run(proxied, "canvas-back", device: .phone, user: "Phone C", base: { () -> ImageGenerationRequest in
+      var plain = request("canvas-back", device: .phone, user: "Phone C")
+      plain.configuration = canvasConfiguration(seed: 71)
+      return plain
+    }())
+    let canvasReceipt = run(proxied, "canvas-back2", device: .phone, user: "Phone C", base: withCanvas("canvas-back2", 0.9, device: .phone, user: "Phone C", seed: 72))
+    let plainMean = receiptMean(plainReceipt.frames)
+    let canvasMean = receiptMean(canvasReceipt.frames)
+    check("the receipt of an image2image order shows its canvas image behind it", plainMean != nil && canvasMean != nil && abs(plainMean! - canvasMean!) > 0.02, "\(plainMean ?? -9) vs \(canvasMean ?? -9)")
 
     func withHint(_ prompt: String, images: [String], weight: Float = 1, mask: String? = nil, seed: UInt32) -> ImageGenerationRequest {
       var hinted = request(prompt, device: .phone, user: "Phone C")
@@ -520,13 +555,13 @@ extension ProxyCommand {
     }
     let sameHintPrompt = "hint-same"
     _ = run(proxied, sameHintPrompt, device: .phone, user: "Phone C", base: withHint(sameHintPrompt, images: ["a", "b"], seed: 1))
-    _ = run(proxied, sameHintPrompt, device: .phone, user: "Phone C", base: withHint(sameHintPrompt, images: ["b", "a"], seed: 2))
-    check("moodboard: the same images (in another order, another seed) start no job", started(sameHintPrompt, expecting: 2) == 1, "\(fake.prompts.filter { $0 == sameHintPrompt }.count) started")
+    _ = run(proxied, sameHintPrompt, device: .phone, user: "Phone C", base: withHint(sameHintPrompt, images: ["b", "a"], seed: 1))
+    check("moodboard: the same images (in another order, same seed) start no job", started(sameHintPrompt, expecting: 2) == 1, "\(fake.prompts.filter { $0 == sameHintPrompt }.count) started")
     let otherHintPrompt = "hint-other"
     _ = run(proxied, otherHintPrompt, device: .phone, user: "Phone C", base: withHint(otherHintPrompt, images: ["a", "b"], seed: 1))
     _ = run(proxied, otherHintPrompt, device: .phone, user: "Phone C", base: withHint(otherHintPrompt, images: ["a", "c"], seed: 1))
     check("moodboard: only an image of it is another one: a new job", started(otherHintPrompt, expecting: 2) == 2, "\(fake.prompts.filter { $0 == otherHintPrompt }.count) started")
-    _ = run(proxied, otherHintPrompt, device: .phone, user: "Phone C", base: withHint(otherHintPrompt, images: ["a", "c"], seed: 2))
+    _ = run(proxied, otherHintPrompt, device: .phone, user: "Phone C", base: withHint(otherHintPrompt, images: ["a", "c"], seed: 1))
     check("moodboard: the changed moodboard sent again is a repeat of that new job", started(otherHintPrompt, expecting: 3) == 2, "\(fake.prompts.filter { $0 == otherHintPrompt }.count) started")
     let weightPrompt = "hint-weight"
     _ = run(proxied, weightPrompt, device: .phone, user: "Phone C", base: withHint(weightPrompt, images: ["a"], weight: 1, seed: 1))
@@ -536,6 +571,22 @@ extension ProxyCommand {
     _ = run(proxied, maskPrompt, device: .phone, user: "Phone C", base: withHint(maskPrompt, images: ["a"], mask: "m1", seed: 1))
     _ = run(proxied, maskPrompt, device: .phone, user: "Phone C", base: withHint(maskPrompt, images: ["a"], mask: "m2", seed: 1))
     check("mask: only the mask is another one: a new job", started(maskPrompt, expecting: 2) == 2, "\(fake.prompts.filter { $0 == maskPrompt }.count) started")
+
+    let seedPrompt = "seed-other"
+    _ = run(proxied, seedPrompt, device: .phone, user: "Phone C", base: withHint(seedPrompt, images: [], seed: 1))
+    _ = run(proxied, seedPrompt, device: .phone, user: "Phone C", base: withHint(seedPrompt, images: [], seed: 1))
+    check("seed: the same seed sent again (no picture, in doubt a pickup) starts no job", started(seedPrompt, expecting: 2) == 1, "\(fake.prompts.filter { $0 == seedPrompt }.count) started")
+    _ = run(proxied, seedPrompt, device: .phone, user: "Phone C", base: withHint(seedPrompt, images: [], seed: 2))
+    check("seed: another seed with nothing else changed is a new job", started(seedPrompt, expecting: 3) == 2, "\(fake.prompts.filter { $0 == seedPrompt }.count) started")
+
+    let seedGroup = Group(code: "uu", key: "k", expected: 1)
+    let seedRequest = withHint("p", images: [], seed: 7)
+    seedGroup.add(Job(group: seedGroup, request: seedRequest), at: Date())
+    var withPicture = withHint("p", images: [], seed: 8)
+    withPicture.image = Data(SHA256.hash(data: Data("receipt".utf8)))
+    check("seed: the seed of the job is no change, any other seed is, unless the request names a picture (a receipt clicked)",
+      !ProxyService.seedChanged(of: seedGroup, in: seedRequest) && ProxyService.seedChanged(of: seedGroup, in: withHint("p", images: [], seed: 8))
+        && !ProxyService.seedChanged(of: seedGroup, in: withPicture), "")
 
     let queuedGroup = Group(code: "zz", key: "k", expected: 1)
     let sameCanvas = withCanvas("p", 0.4, device: .laptop, user: "", seed: 1)
@@ -657,9 +708,28 @@ extension ProxyCommand {
     check("a Batch Count 3 order is three runs", asked("burst", expecting: 3) == 3, "")
     Thread.sleep(forTimeInterval: 1.5)
     burst([21, 22, 23])
-    check("the same order again (other seeds, no picture) starts nothing: one pickup and the rest of its burst", asked("burst", expecting: 3) == 3, "")
+    check("the same data with other seeds and no picture is a new order: three more runs", asked("burst", expecting: 6) == 6, "")
+    Thread.sleep(forTimeInterval: 1.5)
+    burst([21, 22, 23])
+    check("the same seeds again (no picture) start nothing: one pickup and the rest of its burst", asked("burst", expecting: 7) == 6, "")
     burst([31])
-    check("after the pickup the same data is a new order again", asked("burst", expecting: 4) == 4, "")
+    check("after the pickup the same data with a new seed is a new order again", asked("burst", expecting: 7) == 7, "")
+
+    func clip(_ seed: UInt32) -> [Data] {
+      var clipRequest = request("clip", device: .phone, user: "Phone C")
+      clipRequest.configuration = configuration(seed: seed, batchCount: 1)
+      return run(proxied, "clip", device: .phone, user: "Phone C", base: clipRequest).frames
+    }
+    _ = clip(301)
+    Thread.sleep(forTimeInterval: 1.5)
+    _ = clip(302)
+    Thread.sleep(forTimeInterval: 1.5)
+    _ = clip(303)
+    check("three video orders with other seeds are three jobs", asked("clip", expecting: 3) == 3, "\(fake.prompts.filter { $0 == "clip" }.count)")
+    Thread.sleep(forTimeInterval: 1.5)
+    var clipSeen = [Int]()
+    for _ in 0..<2 { clipSeen.append(imageFrames(clip(301))) }
+    check("a video goes out alone (the app glues a stream into one clip): 3 clips waiting, the pickup brings one clip and no receipt behind it", clipSeen.last == 1 && fake.prompts.filter { $0 == "clip" }.count == 3, "\(clipSeen), started \(fake.prompts.filter { $0 == "clip" }.count)")
 
     @discardableResult
     func send(_ prompt: String, user: String, batchCount: UInt32, seed: UInt32) -> [Data] {

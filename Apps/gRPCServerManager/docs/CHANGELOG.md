@@ -9,6 +9,24 @@ Notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.3] - 2026-11-20
+
+### Added
+
+- **Receipt with canvas:** for Image2Image and Image to Video orders, the receipt shows the canvas image behind it, as the previews do (needs the canvas pixels in the request).
+- **More accurate time left:** correct step counts for Image2Image and hires fix, and from the second run of the same kind on, the time after the last step (long for videos) is included. A model download shows its percentage.
+
+### Changed
+
+- **Videos are delivered one per pickup,** so several finished videos no longer end up in one long clip. No receipt is appended after a video.
+- Queue Monitor: a click on a job's preview or icon brings an already open preview window to the front.
+
+### Fixed
+
+- **Queue Draw Things:** a text2image or text2video order with the same parameters and **another seed** is a new job now (before, three receipts led to one generation). A recognised receipt is always a pickup.
+
+---
+
 ## [0.1.2] - 2026-11-19
 
 ### Changed

@@ -461,7 +461,7 @@ final class ProxyService: ImageGenerationServiceProvider {
     logger.info("DECISION \(number): \(isStatus ? "STATUS REQUEST" : "NEW JOB") - \(reason)")
 
     FileLog.shared.append(
-      "REQ \(number) \(request.device) \(request.user.isEmpty ? "-" : request.user) order \(Self.shortHash(Self.monitorGroupKey(of: request).key)) batchCount \(Self.monitorGroupKey(of: request).expected) image \(request.hasImage ? hex(request.image).prefix(8).description : "-") pixels \(request.contents.isEmpty ? "no" : "yes"), inputs [\(Self.inputsSummary(of: request))]: \(isStatus ? "STATUS" : "NEW") - \(reason)")
+      "REQ \(number) \(request.device) \(request.user.isEmpty ? "-" : request.user) order \(Self.shortHash(Self.monitorGroupKey(of: request).key)) batchCount \(Self.monitorGroupKey(of: request).expected) seed \(GenerationConfiguration.from(data: request.configuration).seed) image \(request.hasImage ? hex(request.image).prefix(8).description : "-") pixels \(request.contents.isEmpty ? "no" : "yes"), inputs [\(Self.inputsSummary(of: request))]: \(isStatus ? "STATUS" : "NEW") - \(reason)")
     guard background else {
       return relay(number: number, request: request, context: context)
     }
@@ -648,6 +648,11 @@ final class ProxyService: ImageGenerationServiceProvider {
     return request.contents.contains { Data(SHA256.hash(data: $0)) == request.image } ? request.image : nil
   }
 
+  static func canvasPixels(of request: ImageGenerationRequest) -> Data? {
+    guard request.hasImage else { return nil }
+    return request.contents.first { Data(SHA256.hash(data: $0)) == request.image }
+  }
+
   static func inputsChanged(of group: Group, in request: ImageGenerationRequest, byApp: Bool) -> Bool {
     guard let theirs = group.inputs else { return false }
     let mine = inputs(of: request)
@@ -658,6 +663,23 @@ final class ProxyService: ImageGenerationServiceProvider {
     guard !byApp else { return false }
     if let a = theirs.canvas, let b = mine.canvas, a != b { return true }
     return theirs.hints != mine.hints
+  }
+
+  static func seedChanged(of group: Group, in request: ImageGenerationRequest) -> Bool {
+    guard !request.hasImage else { return false }
+    let seed = GenerationConfiguration.from(data: request.configuration).seed
+    return !group.jobs.contains { job in
+      var own = job.seed
+      for _ in 0..<job.batchSize {
+        if own == seed { return true }
+        own = HistoryFixer.nextSeed(after: own)
+      }
+      return false
+    }
+  }
+
+  static func orderChanged(of group: Group, in request: ImageGenerationRequest, byApp: Bool) -> Bool {
+    seedChanged(of: group, in: request) || inputsChanged(of: group, in: request, byApp: byApp)
   }
 
   private static func isUserHint(_ hint: String) -> Bool { hint.hasPrefix("shuffle[") }
@@ -713,6 +735,7 @@ final class ProxyService: ImageGenerationServiceProvider {
       if existing == nil {
         group.origin = origin
         group.inputs = Self.inputs(of: request)
+        group.canvasData = Self.canvasPixels(of: request)
         groups.append(group)
       }
       let job = Job(group: group, request: request)
@@ -732,10 +755,10 @@ final class ProxyService: ImageGenerationServiceProvider {
       guard let self = self else { return }
       job.finish(result)
       if self.monitor != nil {
-        FileLog.shared.append("RUN \(job.code) run \(job.runIndex) finished: \(job.snapshot().state.label), \(job.undeliveredImageCount) images")
+        FileLog.shared.append("RUN \(job.code) run \(job.runIndex) finished: \(job.snapshot().state.label), \(job.undeliveredImageCount) images; \(job.timingReport)")
       }
       logger.info(
-        "Group \(job.code) run \(job.runIndex) finished: \(job.snapshot().state.label)")
+        "Group \(job.code) run \(job.runIndex) finished: \(job.snapshot().state.label); \(job.timingReport)")
       if case .done = job.state {
         self.results?.save(job, keepDelivered: self.monitor?.isActive == true)
         self.keepWithinLimits()
@@ -884,13 +907,21 @@ final class ProxyService: ImageGenerationServiceProvider {
     let candidates = allGroups.filter(mayDeliver).flatMap { $0.jobs }.sorted { $0.createdAt < $1.createdAt }
     var delivered = [(job: Job, responses: [ImageGenerationResponse])]()
     var imageCount = 0
+    var videoDelivered = false
     for candidate in candidates {
       let waiting = candidate.undeliveredImageCount
       guard waiting > 0 else { continue }
       if maxDeliveryImages > 0, imageCount > 0, imageCount + waiting > maxDeliveryImages {
         break
       }
+      // The app builds ONE clip from a stream, so a video goes out alone, one per query.
+      let video = candidate.producesVideo
+      if video, imageCount > 0 {
+        logger.info("\(candidate.code) run \(candidate.runIndex) is a video and waits for the next query (a video is delivered alone)")
+        break
+      }
 
+      videoDelivered = videoDelivered || video
       let keep = monitor?.isActive == true
       if keep { _ = monitorFinalThumbnail(of: candidate) }
 
@@ -898,6 +929,7 @@ final class ProxyService: ImageGenerationServiceProvider {
       if keep { results?.update(candidate) } else { results?.remove(candidate) }
       delivered.append((candidate, responses))
       imageCount += waiting
+      if video { break }
     }
     if !delivered.isEmpty { noteResultDelivery(client: askerOrigin?.key ?? "local", at: Date()) }
 
@@ -969,6 +1001,8 @@ final class ProxyService: ImageGenerationServiceProvider {
       var statusSent = false
       if replyMode("closing") == "none" {
         logger.info("MEASURE closing=none: delivery without a status image")
+      } else if videoDelivered {
+        logger.info("A video was delivered: no closing status image, the app would bake it into the clip as a frame")
       } else {
         statusSent = respondWith(subject: subject, context: context)
       }
@@ -1101,6 +1135,15 @@ final class ProxyService: ImageGenerationServiceProvider {
     return images[job.nextStatusRenderIndex() % images.count]
   }
 
+  // The canvas of an image2image or image2video order; a receipt that came back as canvas is never used.
+  private func canvasImage(of group: Group) -> CGImage? {
+    guard let data = group.canvasData,
+      let tensor = Tensor<FloatType>(data: data, using: [.zip, .fpzip]),
+      !StatusImage.hasWatermark(tensor)
+    else { return nil }
+    return StatusImage.cgImage(from: tensor)
+  }
+
   private func statusSize(for width: Int, _ height: Int) -> (width: Int, height: Int) {
     guard statusWidth > 0 else { return (width, height) }
     let fixedHeight = max(Int((Double(statusWidth) * statusAspect / 64).rounded()), 1) * 64
@@ -1119,7 +1162,8 @@ final class ProxyService: ImageGenerationServiceProvider {
       let tensor = StatusImage.render(
         model: model,
 
-        preview: (subject.detail == nil ? subject.backdrop : nil) ?? focus.flatMap { previewImage(of: $0) },
+        preview: (subject.detail == nil ? subject.backdrop : nil) ?? focus.flatMap { previewImage(of: $0) }
+          ?? focus.flatMap { canvasImage(of: $0) },
         width: subject.width,
         height: subject.height)
     else { return nil }
@@ -1308,7 +1352,10 @@ final class ProxyService: ImageGenerationServiceProvider {
           case .sampling: phase = .sampling
           case .finishing: phase = .finishing
           }
-          batches.append(.init(state: .running, step: snapshot.step, eta: eta, phase: phase))
+          batches.append(
+            .init(
+              state: .running, step: snapshot.step, eta: eta, phase: phase, totalSteps: snapshot.totalSteps,
+              secondPass: snapshot.secondPass))
         case .done: batches.append(.init(state: snapshot.delivered ? .delivered : .done, step: nil, eta: nil))
         case .failed: batches.append(.init(state: .failed, step: nil, eta: nil))
         case .cancelled: batches.append(.init(state: .cancelled, step: nil, eta: nil))
@@ -1335,13 +1382,12 @@ final class ProxyService: ImageGenerationServiceProvider {
         barTime: "")
     }
     let summary = summarize(group, now: now)
-    let first = group.jobs[0]
     let total = summary.total
     let running = summary.runningJob?.snapshot(now: now)
 
     var fraction = Double(summary.done) / Double(max(total, 1))
-    if let running = running, let step = running.step, first.totalSteps > 0 {
-      fraction += min(Double(step) / Double(first.totalSteps), 1) / Double(max(total, 1))
+    if let running = running, let step = running.step, running.totalSteps > 0 {
+      fraction += min(Double(step) / Double(running.totalSteps), 1) / Double(max(total, 1))
     }
     let unfinished = summary.running + summary.pending > 0
 
@@ -1352,8 +1398,8 @@ final class ProxyService: ImageGenerationServiceProvider {
       switch running?.stage {
       case .finishing:
         barLabel = Loc.t("Finishing…", "Abschluss…")
-      case .sampling where (running?.step ?? 0) >= 1 && first.totalSteps > 0:
-        barLabel = "Sampling… \(running?.step ?? 0) / \(first.totalSteps)"
+      case .sampling where (running?.step ?? 0) >= 1 && (running?.totalSteps ?? 0) > 0:
+        barLabel = (running?.secondPass == true ? Loc.secondPass : "") + "Sampling… \(running?.step ?? 0) / \(running?.totalSteps ?? 0)"
       default:
         barLabel = Loc.t("Processing…", "Verarbeitung…")
       }
@@ -1784,7 +1830,7 @@ extension ProxyService {
         return (true, nil, false)
       }
       let candidates = groups.filter { $0.key == key && inProject($0, project) && inQueue($0) }
-      let same = candidates.first { !Self.inputsChanged(of: $0, in: request, byApp: canvasFromApp) }
+      let same = candidates.first { !Self.orderChanged(of: $0, in: request, byApp: canvasFromApp) }
       if same == nil { anotherCanvas = candidates.first }
       if same != nil { monitorPickup = (key, expected - 1, received) }
       return (false, same, false)
@@ -1813,16 +1859,28 @@ extension ProxyService {
       .filter { inProject($0, project) || $0.id == receiptGroup?.id }.flatMap { $0.jobs }.sorted { $0.createdAt < $1.createdAt }
     var delivered = [(job: Job, responses: [ImageGenerationResponse])]()
     var imageCount = 0
+    let receiptDue = issueReceipts && newGroup != nil
     for candidate in candidates {
       let waiting = candidate.undeliveredImageCount
       guard waiting > 0 else { continue }
       if maxDeliveryImages > 0, imageCount > 0, imageCount + waiting > maxDeliveryImages { break }
+      // The app builds ONE clip from a stream, so a video goes out alone, one per query, and without a receipt after it.
+      let video = candidate.producesVideo
+      if video, receiptDue {
+        monitorLog("MONITOR \(number): \(candidate.code) run \(candidate.runIndex) is a video and waits: this response carries the receipt of the new order, and the app would bake it into the clip")
+        break
+      }
+      if video, imageCount > 0 {
+        monitorLog("MONITOR \(number): \(candidate.code) run \(candidate.runIndex) is a video and waits for the next query (a video is delivered alone)")
+        break
+      }
 
       _ = monitorFinalThumbnail(of: candidate)
       guard let responses = candidate.takeResultsForDelivery(keepFiles: true) else { continue }
       results?.update(candidate)
       delivered.append((candidate, responses))
       imageCount += waiting
+      if video { break }
     }
     let held = lock.withLockCompat { groups }.filter { !inProject($0, project) }
       .flatMap { $0.jobs }.filter { $0.undeliveredImageCount > 0 }
@@ -1910,7 +1968,6 @@ extension ProxyService {
 
       let project = locator?.assignment(of: group.id)?.project
       let s = summarize(group, now: now)
-      let steps = group.jobs[0].totalSteps
       let detail = monitorDetail(group, now: now, etas: etas)
       let jobs = group.jobs.sorted { $0.runIndex < $1.runIndex }
       let lastRun = jobs.last?.runIndex ?? 0
@@ -1961,9 +2018,11 @@ extension ProxyService {
           var line = Loc.t("Processing...", "Verarbeitung…")
           switch snapshot.stage {
           case .finishing: line = Loc.t("Finishing...", "Abschluss…")
-          case .sampling where (snapshot.step ?? 0) >= 1 && steps > 0:
+          case .sampling where (snapshot.step ?? 0) >= 1 && snapshot.totalSteps > 0:
             let step = snapshot.step ?? 0
-            line = Loc.stepLine(step, steps, Int((Double(step) / Double(steps + 1) * 100).rounded()))
+            line =
+              (snapshot.secondPass ? Loc.secondPass : "")
+              + Loc.stepLine(step, snapshot.totalSteps, Int((Double(step) / Double(snapshot.totalSteps + 1) * 100).rounded()))
           default: break
           }
           if let eta = etas[job.id] { parts.append(left(eta)) }
@@ -2263,7 +2322,7 @@ extension ProxyService {
       if mine.contains(where: { $0.canTake(key: key, at: time, window: burstWindow) }) { return nil }
 
       let matching = mine.filter {
-        $0.key == key && inQueue($0) && !Self.inputsChanged(of: $0, in: request, byApp: canvasFromApp)
+        $0.key == key && inQueue($0) && !Self.orderChanged(of: $0, in: request, byApp: canvasFromApp)
       }
       guard let same = matching.last else { return nil }
       oldPickup = (key, origin?.key, expected - 1, time)
@@ -2273,7 +2332,7 @@ extension ProxyService {
           key: same.id, label: same.code, hash: Data(), signature: [], width: 0, height: 0, groups: [])
 
       entry.groups.formUnion(mine.filter { inQueue($0) }.map { $0.id })
-      return (entry, "the same order as \(matching.map { $0.code }.joined(separator: ", ")) is in the queue (everything but the seed is the same; the picture does not count)")
+      return (entry, "the same order as \(matching.map { $0.code }.joined(separator: ", ")) is in the queue (same seed and parameters; the picture does not count)")
     }
   }
 

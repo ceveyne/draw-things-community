@@ -52,6 +52,9 @@ struct StatusModel {
 
     var eta: TimeInterval?
     var phase: Phase? = nil
+
+    var totalSteps: Int? = nil
+    var secondPass = false
   }
 
   struct GroupBlock {
@@ -637,9 +640,10 @@ enum StatusImage {
         var first = Loc.t("Processing...", "Verarbeitung…")
         switch running.phase {
         case .finishing: first = Loc.t("Finishing...", "Abschluss…")
-        case .sampling where (running.step ?? 0) >= 1 && block.steps > 0:
+        case .sampling where (running.step ?? 0) >= 1 && (running.totalSteps ?? block.steps) > 0:
           let step = running.step ?? 0
-          first = Loc.stepLine(step, block.steps, Int((Double(step) / Double(block.steps + 1) * 100).rounded()))
+          let steps = running.totalSteps ?? block.steps
+          first = (running.secondPass ? Loc.secondPass : "") + Loc.stepLine(step, steps, Int((Double(step) / Double(steps + 1) * 100).rounded()))
         default: break
         }
         var parts = [String]()

@@ -163,6 +163,12 @@ struct ProxyCommand: ParsableCommand {
 
   @Flag(
     help:
+      "Feeds made-up signposts with made-up arrival times to a job and checks phase, step counts and time left (Image2Image step count, second pass, decoding time learned in the session). Exits without starting the proxy."
+  )
+  var probeEta = false
+
+  @Flag(
+    help:
       "Starts a made-up server, the proxy in front of it and a client that marks its calls like a plugin, and checks that the client gets the same frames and status as from the server directly, that the monitor shows the call, that a cancel works from both sides, and that nothing of the app is touched. Exits without starting the proxy."
   )
   var probeTrackedRelay = false
@@ -297,6 +303,10 @@ struct ProxyCommand: ParsableCommand {
     }
     if let directory = probeCompareConfigs {
       runCompareConfigs(directory)
+      return
+    }
+    if probeEta {
+      runEtaProbe()
       return
     }
     if probeTrackedRelay {
